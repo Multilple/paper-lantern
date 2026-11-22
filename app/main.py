@@ -229,6 +229,7 @@ def main():
             plans[cid] = p
     log("plans", collections.Counter((p.kind, p.tier3) for p in plans.values()))
 
+    forced = {}
     probe = set()
     try:
         probe = set(json.load(open(os.path.join(HERE, "probe.json"))))
@@ -241,6 +242,11 @@ def main():
             "t3func" if p.why == {"func"} else "t3other"
         if cat in probe:
             p.kind, p.reason = "all", "probe"
+        if "code" in probe and cat in ("t3func", "t3other"):
+            k = 4 if "incomparable" in p.why else 3 if "syntax" in p.why else 8 if p.why != {"func"} else \
+                1 if p.cands else 2
+            forced[cid] = k
+            p.kind, p.reason = "all", "probe code %d" % k
         if p.kind == "none":
             answers[cid] = []
         elif p.kind == "all":
@@ -322,6 +328,9 @@ def main():
         if nums is None:
             nums = everything
         _, workers = pack.pack(nums, ms)
+        if cid in forced:
+            items = sorted(((ms[t], t) for t in everything), reverse=True)
+            workers = [[t for _, t in b] for b in pack._lpt(items, forced[cid])[1]]
         lines.append(json.dumps({"commit": cid, "workers": workers}, separators=(",", ":")))
     data = ("\n".join(lines) + "\n").encode() if lines else b""
     while data:
