@@ -114,7 +114,12 @@ class TraceControl:
         return True
 
     def same(self, name, value, fp=units.fp_state):
+        t0 = time.process_time()
         self.fps[name] = fp(value)
+        if self.timing:
+            dt = time.process_time() - t0
+            self.cpu["F"] += dt        # taking fingerprints is its own cost
+            self._t += dt
         return True
 
     def can_cut(self):
@@ -281,6 +286,9 @@ def trace_test(test_id, modules):
         return {"lines": tr.take().get("S", {}), "opened": sorted(tr.opened), "n": kind.count(),
                 "inputs": kind.unit_inputs(), "class_cpu": t1 - t0, "preamble_cpu": t2 - t1, "extra": extra}
 
+    if getattr(probe_kind, "verify_whole", False):
+        # the units of this kind do not run the test's own comparison: the test itself must pass
+        assert in_child(lambda: not core.run_test(test_id, modules)), "the test fails on the pinned commit"
     out["setup"] = in_child(setup)
     n = out["setup"]["n"]
     print(test_id, "units", n, "setup lines", sum(len(v) for v in out["setup"]["lines"].values()), flush=True)

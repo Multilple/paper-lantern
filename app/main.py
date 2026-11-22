@@ -229,8 +229,17 @@ def main():
             plans[cid] = p
     log("plans", collections.Counter((p.kind, p.tier3) for p in plans.values()))
 
+    probe = set()
+    try:
+        probe = set(json.load(open(os.path.join(HERE, "probe.json"))))
+    except Exception:
+        pass
     answers = {}   # cid -> list of numbers
     for cid, p in plans.items():
+        cat = "none" if p.kind == "none" else "all" if p.kind == "all" else "tier3" if p.tier3 else \
+            "swap" if p.py else "data"
+        if cat in probe:
+            p.kind, p.reason = "all", "probe"
         if p.kind == "none":
             answers[cid] = []
         elif p.kind == "all":

@@ -189,6 +189,8 @@ def fingerprint(loose_keys=()):
             if k in _SKIP_GLOBALS:
                 continue
             fp[("g", name, k)] = pr.digest(v, ("g", name, k))
+    import gc
+    gc.collect()   # classes that are garbage but not yet freed must not be counted
     classes = all_classes()
     count = {}
     for c in classes:
@@ -197,13 +199,20 @@ def fingerprint(loose_keys=()):
     for c in classes:
         key = "%s:%s" % (c.__module__, c.__qualname__)
         if count[key] > 1:
-            fp[("c", key, "<dup>")] = b"dup%d" % count[key]
+            # several classes share this name (made by a metaclass or a factory): one entry for
+            # the group, from the sorted digests of their attributes
+            h = strict.digest(sorted((k, strict.digest(v)) for k, v in list(vars(c).items())
+                                     if k not in _SKIP_CLASS_ATTRS))
+            fp.setdefault(("c", key, "<dup>"), []).append(h)
             continue
         fp[("c", key, "<bases>")] = strict.digest(tuple(c.__mro__))
         for k, v in list(vars(c).items()):
             if k in _SKIP_CLASS_ATTRS:
                 continue
             fp[("c", key, k)] = pr.digest(v, ("c", key, k))
+    for k, v in fp.items():
+        if isinstance(v, list):
+            fp[k] = b"".join(sorted(v))
     return fp
 
 
