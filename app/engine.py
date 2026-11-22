@@ -13,6 +13,7 @@ import sys
 import types
 
 import attrmap
+import keymap
 import codediff
 import core
 import pack
@@ -53,6 +54,7 @@ class Ctx:
     scale = 1.0        # this machine against the one the costs were measured on
     index = None       # filename -> {(firstlineno, qualname): [live functions]}  (warm process only)
     base_fp = None     # fingerprint of the pinned import state (fresh children only)
+    base_keys = None   # {(class, attr): {key name: digest}} of the pinned class-level dicts
     lazy_idx = None    # idx of the test that starts a python subprocess
     bare = None        # relpaths that "import sqlglot" loads
     hard = None        # time.monotonic() value after which no test is run any more
@@ -190,6 +192,11 @@ def _sources(root):
     return _src_cache
 
 
+def mapslib_dir():
+    import maps as mapslib
+    return mapslib.DIR
+
+
 def _resolve(name):
     mod, _, qual = name.partition(":")
     o = sys.modules.get(mod)
@@ -202,9 +209,24 @@ def _resolve(name):
     return o if isinstance(o, type) else None
 
 
-def roots_to_tests(roots, ctx, plan):
+def roots_to_tests(roots, ctx, plan, subst=None):
     maps = ctx.maps
     acc = 0
+    acc0 = 0
+    # tables first: maps/keys knows which tests asked for which KEY of a class-level dict
+    # (keymap.py). A table it vouches for gives the tests that asked for a changed key or used
+    # the table as a whole; everything else goes on to the maps below.
+    if ctx.base_keys:
+        try:
+            def new_keys(root):
+                kind, owner, attr = root
+                o = _resolve(owner) if kind == "c" else sys.modules.get(owner)
+                if o is None or attr not in vars(o):
+                    return None
+                return statefp.key_digests(vars(o)[attr], subst)
+            acc0, roots = keymap.narrow(roots, ctx.base_keys, new_keys, mapslib_dir())
+        except Exception:
+            acc0 = 0
     # class attributes first: maps/attrs.bin knows which tests READ an attribute of a class
     # (attrmap.py). Roots it cannot vouch for go the broad way below.
     amap = None
@@ -259,7 +281,7 @@ def roots_to_tests(roots, ctx, plan):
             for rel, text in srcs.items():
                 if pat.search(text) or (rel in patched and pat.search(patched[rel])):
                     acc |= maps.tests_in_file(rel)
-    return acc
+    return acc | acc0
 
 
 # ---------------------------------------------------------------- running
@@ -275,7 +297,7 @@ RSS_LIMIT = int(float(os.environ.get("BR_RSS_MB", "1300")) * 1024 * 1024)
 RSS_LIMIT_BIG = int(2900 * 1024 * 1024)
 # the one pinned test that needs a lot of memory by itself (about 1.7 GB: two million tokens)
 BIG_MEMORY_TESTS = {"tests/test_parser.py::TestParser::test_max_nodes"}
-DATA_LIMIT = int(float(os.environ.get("BR_DATA_MB", "3600")) * 1024 * 1024)
+DATA_LIMIT = int(float(os.environ.get("BR_DATA_MB", "3200")) * 1024 * 1024)
 _rss_limit = [RSS_LIMIT]
 _PAGE = os.sysconf("SC_PAGE_SIZE")
 
@@ -302,6 +324,13 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     os.dup2(dn, 0); os.dup2(dn, 1)
     if os.environ.get("BR_DEBUG") != "1":
         os.dup2(dn, 2)
+    try:
+        # before any patched code runs (a fresh import included): one huge allocation cannot be
+        # stopped by a timer, a limit on the data segment turns it into a MemoryError
+        import resource
+        resource.setrlimit(resource.RLIMIT_DATA, (DATA_LIMIT, DATA_LIMIT))
+    except Exception:
+        pass
     install_overlay(ctx.root, plan.data, tmpdir)
     install_sources(ctx.root, plan.py)
     failed_now = 0
@@ -341,8 +370,8 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             for rel in plan.py:
                 cands_extra = ctx.maps.tests_in_file(rel)
                 plan.cands |= cands_extra
-        out("N %d %s" % (len(roots), ";".join(sorted("%s|%s|%s" % k for k in roots))[:300]))
-        cands = plan.cands | roots_to_tests(roots, ctx, plan)
+        out("N %d %s" % (len(roots), ";".join(sorted("%s|%s|%s" % k for k in roots))[:int(os.environ.get("BR_NLEN", "300"))]))
+        cands = plan.cands | roots_to_tests(roots, ctx, plan, subst)
         if plan.lazy and ctx.lazy_idx is not None and any(r in ctx.bare for r in plan.py):
             cands |= 1 << ctx.lazy_idx
         cands &= ~failed_now

@@ -238,6 +238,51 @@ def fingerprint(loose_keys=(), subst=None):
     return fp
 
 
+def key_digests(table, subst=None, pr=None):
+    """{key name: digest of the value} for a class-level dict, or None when it is not a plain dict
+    or its keys have no distinct names (keymap.py). Same digests in every process."""
+    import keymap
+    if type(table) is not dict:
+        return None
+    names = keymap.names_of(table)
+    if names is None:
+        return None
+    if pr is None:
+        pr = Printer()
+        pr.subst = subst or {}
+    return {n: pr._sub(table[k], set(), 0) for n, k in names.items()}
+
+
+def all_key_digests(wanted, subst=None):
+    """wanted: roots ("c", class name, attr) / ("g", module, name).
+    -> {root: key_digests(...)} for the live classes and modules."""
+    out = {}
+    pr = Printer()
+    pr.subst = subst or {}
+    count = {}
+    classes = all_classes()
+    for c in classes:
+        key = "%s:%s" % (c.__module__, c.__qualname__)
+        count[key] = count.get(key, 0) + 1
+    for c in classes:
+        key = "%s:%s" % (c.__module__, c.__qualname__)
+        if count[key] != 1:
+            continue
+        for k, v in list(vars(c).items()):
+            if ("c", key, k) in wanted:
+                d = key_digests(v, None, pr)
+                if d is not None:
+                    out[("c", key, k)] = d
+    for kind, mn, name in wanted:
+        if kind == "g":
+            mod = sys.modules.get(mn)
+            if mod is not None and name in vars(mod):
+                d = key_digests(vars(mod)[name], None, pr)
+                if d is not None:
+                    out[(kind, mn, name)] = d
+    return out
+
+
 def changed_roots(base, now):
     out = set()
     for k, d in now.items():

@@ -77,13 +77,13 @@ _tags = {}
 
 
 def index(maps_dir):
-    """-> {(class name, attr): file number} of the tables the trace vouches for"""
+    """-> {("c", class name, attr) | ("g", module, name): file number} of the tables the trace vouches for"""
     ix = _index.get(maps_dir)
     if ix is None:
         try:
             with open(os.path.join(maps_dir, "keys", "index.json")) as f:
                 raw = json.load(f)
-            ix = {(c, a): n for c, a, n in raw["tags"]}
+            ix = {(k, o, a): n for k, o, a, n in raw["tags"]}
         except Exception:
             ix = {}
         _index[maps_dir] = ix
@@ -100,22 +100,18 @@ def _load(maps_dir, n):
     return d
 
 
-def narrow(roots, base_fp, fp, maps_dir):
-    """roots: statefp.changed_roots(base_fp, fp).
+def narrow(roots, base_keys, new_keys, maps_dir):
+    """roots: statefp.changed_roots(...). base_keys: {root: {key name: digest}} of the pinned
+    import. new_keys(root) -> the same for the patched import, or None.
     -> (bitmap of the tests that can see the changed entries of the tables this covers,
         the roots that are left for the other maps)."""
     ix = index(maps_dir)
     acc = 0
     rest = set()
     for r in roots:
-        if r[0] == "k":
-            continue
-        if r[0] != "c":
-            rest.add(r)
-            continue
-        n = ix.get((r[1], r[2]))
-        kk = ("k", r[1], r[2])
-        old, new = base_fp.get(kk), fp.get(kk)
+        n = ix.get(r)
+        old = base_keys.get(r) if n is not None else None
+        new = new_keys(r) if old is not None else None
         if n is None or old is None or new is None:
             rest.add(r)
             continue
@@ -125,6 +121,10 @@ def narrow(roots, base_fp, fp, maps_dir):
             rest.add(r)
             continue
         acc |= int.from_bytes(d["whole"], "little")
+        if len(old) != len(new):
+            acc |= int.from_bytes(d["len"], "little")      # tests that asked how many entries there are
+        if (not old) != (not new):
+            acc |= int.from_bytes(d["bool"], "little")     # tests that asked whether it is empty
         keys = d["keys"]
         for name in set(old) | set(new):
             if old.get(name) != new.get(name):

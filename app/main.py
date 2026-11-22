@@ -54,6 +54,13 @@ def _read_exact(fd, n):
 
 
 def recv(fd):
+    try:
+        return _recv(fd)
+    except Exception:
+        return None
+
+
+def _recv(fd):
     h = _read_exact(fd, 4)
     if h is None:
         return None
@@ -62,6 +69,17 @@ def recv(fd):
 
 
 _child_n = [0]
+_OUT = [None]     # the real stdout, kept by the main process only
+_STATE = {}       # what the main process needs to print the answers, also after a failure
+
+
+def _close_all_but(keep):
+    for fd in range(3, 256):
+        if fd != keep:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def run_child(plan, ctx, mode):
@@ -73,7 +91,9 @@ def run_child(plan, ctx, mode):
     pid = os.fork()
     if pid == 0:
         try:
-            os.close(r)
+            # patched code runs here: it gets no descriptor of ours but its report pipe (not the
+            # real stdout, not the pipe of the warm process)
+            _close_all_but(w)
             os.setsid()
             engine.run_commit(plan, ctx, w, mode, tmpdir)
         except BaseException as e:
@@ -107,10 +127,22 @@ def run_child(plan, ctx, mode):
         if not chunk:
             break
         buf += chunk
+        if len(buf) > (1 << 22) and b"\n" not in buf:
+            note = "watchdog"      # megabytes without a line end: not a report
+            break
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            line = line.decode()
-            tag = line[:1]
+            try:
+                line = line.decode("ascii")
+                tag = line[:1]
+                if tag in "SFP":
+                    if not 0 <= int(line[2:]) < len(meta):
+                        continue
+                elif tag in "LU":
+                    if any(not 0 <= int(x) < len(meta) for x in line[2:].split()):
+                        continue
+            except (ValueError, UnicodeError):
+                continue      # not a line of ours
             if tag == "S":
                 started = int(line[2:])
                 key = meta[started][0] + "::" + meta[started][1]
@@ -140,6 +172,8 @@ def run_child(plan, ctx, mode):
                 note = line
             elif tag == "!":
                 note = line
+        if done:
+            break      # the report is complete: whatever else holds the pipe open is not waited for
     os.close(r)
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -175,9 +209,14 @@ def warm_main(plans, ctx, wfd, wall_limit):
     # what a CPU second of a test run is charged in the run-or-select rule, against the costs in the
     # maps. A fixed factor: measuring this machine's speed from one short import was too noisy.
     ctx.scale = float(os.environ.get("BR_SCALE") or CPU_PRICE)
-    fp = statefp.fingerprint() if any(True for _ in [1]) else None
+    fp = statefp.fingerprint()
+    try:
+        import keymap
+        keys = statefp.all_key_digests(set(keymap.index(mapslib.DIR))) if os.environ.get("BR_NOKEYS") != "1" else {}
+    except Exception:
+        keys = {}
     t1 = time.process_time()
-    send(wfd, ("B", fp, ctx.scale))
+    send(wfd, ("B", fp, ctx.scale, keys))
     if plans:
         ctx.index = engine.build_index()
     t2 = time.process_time()
@@ -196,6 +235,44 @@ def warm_main(plans, ctx, wfd, wall_limit):
 def main():
     out_fd = os.dup(1)
     os.dup2(2, 1)
+    _OUT[0] = out_fd
+    me = os.getpid()
+    try:
+        _main(out_fd)
+    except BaseException as e:
+        if os.getpid() != me:
+            os._exit(1)
+        if _OUT[0] is None:
+            raise                       # the answers are already out
+        log("main failed:", repr(e))
+        try:
+            if "cids" not in _STATE:
+                raise KeyError("nothing planned yet")
+            _emit(out_fd)               # what was decided so far; every test for the rest
+        except BaseException:
+            if _OUT[0] is not None:
+                _fallback(out_fd)
+
+
+def _fallback(out_fd):
+    """Every test for every commit: the answer that cannot miss."""
+    tests = json.load(open(os.path.join(DATA, "tests.json")))["tests"]
+    ms = {t["number"]: int(round(t["seconds"] * 1000)) for t in tests}
+    cdir = os.path.join(DATA, "commits")
+    cids = sorted(f[:-6] for f in os.listdir(cdir) if f.endswith(".patch"))
+    try:
+        _, workers = pack.pack(list(ms), ms)
+    except Exception:
+        nums = sorted(ms)
+        workers = [nums[i::8] for i in range(8) if nums[i::8]]
+    data = "".join(json.dumps({"commit": c, "workers": workers}, separators=(",", ":")) + "\n" for c in cids).encode()
+    _OUT[0] = None
+    while data:
+        k = os.write(out_fd, data)
+        data = data[k:]
+
+
+def _main(out_fd):
     tests = json.load(open(os.path.join(DATA, "tests.json")))["tests"]
     maps = mapslib.Maps()
     root = core.ROOT
@@ -232,6 +309,8 @@ def main():
     plans = {}
     for cid in cids:
         try:
+            if time.monotonic() - T0 > 0.35 * wall_limit:
+                raise RuntimeError("planning took too long")     # -> every test for this commit
             with open(os.path.join(cdir, cid + ".patch"), encoding="utf-8", newline="") as f:
                 text = f.read()
             plans[cid] = planlib.make_plan(cid, text, maps, root)
@@ -248,6 +327,7 @@ def main():
     except Exception:
         pass
     answers = {}   # cid -> list of numbers
+    _STATE.update(cids=cids, answers=answers, everything=everything, ms=ms, forced=forced)
     for cid, p in plans.items():
         cat = "none" if p.kind == "none" else "all" if p.kind == "all" else "swap" if (p.py and not p.tier3) else \
             "data" if not p.tier3 else "t3shell" if "shell" in p.why else \
@@ -309,7 +389,7 @@ def main():
         wpid = os.fork()
         if wpid == 0:
             try:
-                os.close(r)
+                _close_all_but(w)
                 warm_main(swap_plans, ctx, w, wall_limit)
             except BaseException as e:
                 log("warm process failed", repr(e))
@@ -320,6 +400,7 @@ def main():
         warm_alive = msg is not None
         if warm_alive:
             ctx.base_fp, ctx.scale = msg[1], msg[2]
+            ctx.base_keys = msg[3] if len(msg) > 3 else None
         log("warm ready, scale %.2f" % ctx.scale)
         pending = {p.cid for p in swap_plans}
         # one test-running child at a time: a single pinned test needs 1.7 GB by itself and the
@@ -330,13 +411,22 @@ def main():
                 if ctx.base_fp is None or time.monotonic() - T0 > wall_limit:
                     finish(p.cid, {"all": True, "note": "no base state or out of time"})
                 else:
-                    finish(p.cid, run_child(p, ctx, "fresh"))
+                    try:
+                        res = run_child(p, ctx, "fresh")
+                    except Exception as e:
+                        res = {"all": True, "note": "bookkeeping failed: %r" % (e,)}
+                    finish(p.cid, res)
                 continue
             msg = recv(r)
             if msg is None or msg[0] == "Q":
                 warm_alive = False
                 continue
-            _, cid, res = msg
+            try:
+                _, cid, res = msg
+                if cid not in plans or not isinstance(res, dict):
+                    continue
+            except Exception:
+                continue
             pending.discard(cid)
             if res.get("escalate"):
                 plans[cid].tier3 = True
@@ -353,18 +443,29 @@ def main():
         except OSError:
             pass
 
+    _emit(out_fd)
+
+
+def _emit(out_fd):
+    """One line per commit from what is known; every test for a commit without an answer."""
+    cids, answers, everything, ms, forced = (_STATE[k] for k in ("cids", "answers", "everything", "ms", "forced"))
     lines = []
     for cid in cids:
         nums = answers.get(cid)
-        if nums is None:
-            nums = everything
-        _, workers = pack.pack(nums, ms)
-        if cid in forced:
-            items = sorted(((ms[t], t) for t in everything), reverse=True)
-            workers = [[t for _, t in b] for b in pack._lpt(items, forced[cid])[1]]
+        try:
+            if nums is None:
+                nums = everything
+            _, workers = pack.pack(nums, ms)
+            if cid in forced:
+                items = sorted(((ms[t], t) for t in everything), reverse=True)
+                workers = [[t for _, t in b] for b in pack._lpt(items, forced[cid])[1]]
+        except Exception:
+            nums = sorted(ms)
+            workers = [nums[i::8] for i in range(8) if nums[i::8]]
         lines.append(json.dumps({"commit": cid, "workers": workers}, separators=(",", ":")))
     log("main process cpu %.2f" % time.process_time())
     data = ("\n".join(lines) + "\n").encode() if lines else b""
+    _OUT[0] = None
     while data:
         k = os.write(out_fd, data)
         data = data[k:]
