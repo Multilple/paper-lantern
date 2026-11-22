@@ -14,12 +14,16 @@ import types
 import codediff
 import core
 import pack
+import policy
 import statefp
+import units
 from maps import bits
 
 # ---- how much a test run may cost before the test is selected without a verdict
 THETA_CLEAN = float(os.environ.get("BR_THETA_CLEAN", "0.75"))   # nothing has failed yet
 THETA_DIRTY = float(os.environ.get("BR_THETA_DIRTY", "0.9"))    # something already failed
+UNITS_GAIN = 0.9      # decide a giant unit by unit when that is expected to cost less than this share of a run
+POLICY_MODEL = policy.Model(0.15, 0.2, 0.1, small=(0.0, 5.0, 0.5), small_n=2)
 TIMEOUT_MIN = 4.0
 TIMEOUT_FACTOR = 15.0
 
@@ -189,29 +193,20 @@ def roots_to_tests(roots, ctx, plan):
     acc = 0
     cnames = {k[1] for k in roots if k[0] == "c"}
     if cnames:
-        cobjs = {o for o in (_resolve(n) for n in cnames) if o is not None}
-        touched = set()   # changed classes that some test is known to touch
-        for kname, tests in maps.types.items():
-            hit = kname in cnames
-            k = None
-            if not hit:
-                k = _resolve(kname)
-                hit = k is None or any(c in cobjs for c in k.__mro__)
-            if hit:
+        # maps/types.json lists, for every class, the tests that handle an object of that class
+        # or of a class that inherits from it (names of the pinned commit)
+        types = maps.types
+        for n in cnames:
+            tests = types.get(n)
+            if tests:
                 for i in tests:
                     acc |= 1 << i
-                if kname in cnames:
-                    touched.add(kname)
-                elif k is not None:
-                    for c in k.__mro__:
-                        if c in cobjs:
-                            touched.add("%s:%s" % (c.__module__, c.__qualname__))
-        for n in cnames - touched:
-            # no test is recorded as touching this class: fall back to every test that runs a
-            # line of the file that defines it
-            rel = n.split(":")[0].replace(".", "/")
-            for cand in (rel + ".py", rel + "/__init__.py"):
-                acc |= maps.tests_in_file(cand)
+            else:
+                # no test is recorded as touching this class: fall back to every test that runs
+                # a line of the file that defines it
+                rel = n.split(":")[0].replace(".", "/")
+                for cand in (rel + ".py", rel + "/__init__.py"):
+                    acc |= maps.tests_in_file(cand)
         for n in cnames:
             if n.startswith("tests."):
                 f = n.split(":")[0].replace(".", "/") + ".py"
@@ -276,6 +271,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     install_overlay(ctx.root, plan.data, tmpdir)
     install_sources(ctx.root, plan.py)
     failed_now = 0
+    roots = None
     if mode == "swap":
         if not do_swaps(plan, ctx):
             out("X")
@@ -321,21 +317,25 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         out("F %d" % i)
     cands &= ~plan.unrun
     cpu, secs, setup, meta, scale = ctx.cpu, ctx.seconds_ms, ctx.setup, ctx.meta, ctx.scale
+    # the few giant tests can be decided unit by unit (units.py): what that is expected to cost
+    uchanged, ucost = None, {}
+    try:
+        uchanged = units.changed_of(plan, mode, same_import_state=(mode != "swap" and not roots))
+        for i in bits(cands):
+            tid = "%s::%s::%s" % meta[i]
+            if units.supported(tid):
+                est = units.estimate(tid, uchanged)
+                if est is not None and est < UNITS_GAIN * cpu[i]:
+                    ucost[i] = est
+    except Exception:
+        ucost = {}
+    if ucost:
+        cpu = list(cpu)
+        for i, est in ucost.items():
+            cpu[i] = est
     order = sorted(bits(cands), key=lambda i: (cpu[i], i))
     out("L " + " ".join(str(i) for i in order))
-    F_total = F_long = F_n = 0
-    for i in bits(failed_now | plan.unrun):
-        F_total += secs[i]; F_long = max(F_long, secs[i]); F_n += 1
-    U_total = sum(secs[i] for i in order)
-    suffix_long = [0] * (len(order) + 1)   # tests are run cheapest first; the longest left is in the suffix
-    for j in range(len(order) - 1, -1, -1):
-        suffix_long[j] = max(suffix_long[j + 1], secs[order[j]])
-    R = sum(cpu[i] for i in order) * scale
-    classes = {}
-    for i in order:
-        key = meta[i][0] + "::" + meta[i][1]
-        classes[key] = classes.get(key, 0) + 1
-    R += sum(setup.get(k, 0.0) for k in classes) * scale
+    st = _PolicyState(order, failed_now | plan.unrun, bin(failed_now).count("1"), ctx, cpu)
     hung = set()
     signal.signal(signal.SIGVTALRM, _on_alarm)
     signal.signal(signal.SIGPROF, _on_prof)
@@ -345,31 +345,22 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     except Exception:
         pass
     farm = None
-    pos = 0
-    n = len(order)
-    while pos < n:
-        i = order[pos]
-        key = meta[i][0] + "::" + meta[i][1]
-        stop_cost = pack.bound(F_total + U_total, max(F_long, suffix_long[pos]), F_n + n - pos)
-        if F_n:
-            gain = stop_cost - pack.bound(F_total, F_long, F_n)
-            stop = R * 1000.0 > THETA_DIRTY * gain
-        else:
-            stop = R * 1000.0 > THETA_CLEAN * stop_cost
-        if stop:
+    while st.rem:
+        try:
+            act = policy.decide_next(st, POLICY_MODEL)
+        except Exception:
+            act = ("stop",)
+        if act[0] != "run":
             break
-        pos += 1
-        U_total -= secs[i]
-        c = cpu[i] * scale
-        R -= c
+        i = act[1]
+        st.rem.discard(i)
+        key = meta[i][0] + "::" + meta[i][1]
         if key in hung:
             out("F %d" % i)
-            F_total += secs[i]; F_long = max(F_long, secs[i]); F_n += 1
+            st.failed.append(i)
             continue
-        if core.class_state(meta[i]) is None:
-            R -= setup.get(key, 0.0) * scale
         out("S %d" % i)
-        limit = max(TIMEOUT_MIN, TIMEOUT_FACTOR * (cpu[i] + setup.get(key, 0.0))) * max(scale, 1.0)
+        limit = max(TIMEOUT_MIN, TIMEOUT_FACTOR * (ctx.cpu[i] + setup.get(key, 0.0))) * max(scale, 1.0)
         cwd = None
         if i == ctx.lazy_idx and plan.py:
             if farm is None:
@@ -380,7 +371,17 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         signal.setitimer(signal.ITIMER_PROF, 0.2, 0.2)
         timed_out = False
         try:
-            bad = core.run_test("%s::%s::%s" % meta[i], modules)
+            verdict = "unknown"
+            if i in ucost:
+                verdict = units.decide("%s::%s::%s" % meta[i], uchanged, modules)
+                if units.last.get("timeout"):
+                    timed_out = True
+                if verdict == "unknown" and ctx.cpu[i] > 3.0:
+                    verdict = "fail"   # no cheap verdict: selected without one, a full run costs more
+            if verdict == "unknown":
+                bad = core.run_test("%s::%s::%s" % meta[i], modules)
+            else:
+                bad = verdict == "fail"
         except core.TestTimeout:
             bad = True
             timed_out = True
@@ -394,11 +395,54 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         if timed_out:
             bad = True
             hung.add(key)
+        st.done_cls.add(key)
         if bad:
             out("F %d" % i)
-            F_total += secs[i]; F_long = max(F_long, secs[i]); F_n += 1
+            st.failed.append(i)
         else:
             out("P %d" % i)
-    if pos < n:
-        out("U " + " ".join(str(i) for i in order[pos:]))
+            st.passed.append(i)
+    if st.rem:
+        out("U " + " ".join(str(i) for i in sorted(st.rem)))
     out("E")
+
+
+class _PolicyState:
+    """What policy.decide_next sees: verdicts so far and the cost tables (CPU scaled to this machine)."""
+
+    def __init__(self, order, forced_bits, n_forced_fail, ctx, cpu):
+        self.rem = set(order)
+        self.passed, self.failed = [], []
+        self.forced = bits(forced_bits)
+        self.n_forced_fail = n_forced_fail
+        self.secs = ctx.seconds_ms
+        self.meta = ctx.meta
+        self.cls = _Cls(ctx.meta)
+        self.cpu = _Scaled(cpu, ctx.scale)
+        self.setup, self.scale = ctx.setup, ctx.scale
+        self.done_cls = set()
+        self.memo = {}
+
+    def cost(self, i):
+        k = self.cls[i]
+        c = self.cpu[i]
+        if k not in self.done_cls and core.class_state(self.meta[i]) is None:
+            c += self.setup.get(k, 0.0) * self.scale
+        return c
+
+
+class _Cls:
+    def __init__(self, meta):
+        self.meta = meta
+
+    def __getitem__(self, i):
+        m = self.meta[i]
+        return m[0] + "::" + m[1]
+
+
+class _Scaled:
+    def __init__(self, cpu, scale):
+        self.cpu, self.scale = cpu, scale
+
+    def __getitem__(self, i):
+        return self.cpu[i] * self.scale
