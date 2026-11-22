@@ -21,6 +21,31 @@ _armed = [0]      # 0 off, 1 test-module import phase (record, never unwrap), 2 
 _data_hits = []   # (Data wrapper, lookup class)
 _once_hits = []   # Once / OnceData wrappers
 _raw_hits = []    # (class name, attr, what): somebody used a wrapper taken straight from a class __dict__
+_quiet = [0]      # the generator is filling its dispatch table (see hook_dispatch)
+
+
+def hook_dispatch():
+    """sqlglot/generator.py: _build_dispatch copies TRANSFORMS and then getattr()s EVERY `*_sql`
+    method of the class into a per-class table, once per class and process. That is not a use
+    of those methods: which entries of the table a test asks for is in the key map (maps/keys,
+    tools/trace_keys.py notes the table's lookups under the class's TRANSFORMS). So nothing is
+    noted while the table is filled; a method that a test calls by name is noted as before."""
+    import inspect
+    gen = sys.modules.get("sqlglot.generator")
+    orig = getattr(gen, "_build_dispatch", None)
+    if orig is None or "getattr(cls, attr_name)" not in inspect.getsource(orig) \
+            or not isinstance(getattr(gen, "_DISPATCH_CACHE", None), dict):
+        return False
+    gen._DISPATCH_CACHE.clear()
+
+    def _build_dispatch(cls):
+        _quiet[0] += 1
+        try:
+            return orig(cls)
+        finally:
+            _quiet[0] -= 1
+    gen._build_dispatch = _build_dispatch
+    return True
 
 
 class Data:
@@ -51,7 +76,7 @@ class Once:
 
     def _fire(self):
         a = _armed[0]
-        if a:
+        if a and not _quiet[0]:
             if not self.hit:
                 self.hit = True
                 _once_hits.append(self)
@@ -149,6 +174,7 @@ def main():
     files = sorted({t["file"] for t in tests})
     core.Warm([])                       # sqlglot only
     named, own = install()
+    print("dispatch hook:", hook_dispatch(), file=sys.stderr)
     cid = {c: i for i, c in enumerate(named)}
     attrs = sorted({k for d in own.values() for k in d} | {"<none>"})
     aid = {a: i for i, a in enumerate(attrs)}

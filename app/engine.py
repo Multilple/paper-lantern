@@ -223,6 +223,92 @@ def _resolve(name):
     return o if isinstance(o, type) else None
 
 
+def _new_methods(roots, ctx, amap):
+    """A method that a generator or parser class did not have before (added, or the new name of a
+    renamed one). Who can call it? Code the patch changed (candidates through its own lines), the
+    generator's dispatch table (_dispatch_users), and every call by that name that went to the
+    method of the same name further up the class's bases before: the tests that read THAT
+    method, whatever class they read it through.
+    -> (bitmap, the roots answered here)"""
+    gen = sys.modules.get("sqlglot.generator")
+    par = sys.modules.get("sqlglot.parser")
+    bases = tuple(x for x in (getattr(gen, "Generator", None), getattr(par, "Parser", None)) if isinstance(x, type))
+    acc, done = 0, set()
+    if not bases or not ctx.base_fp:
+        return acc, done
+    cid, aid, own, key, table = amap["cid"], amap["aid"], amap["own"], amap["key"], amap["table"]
+    NA, nocover = len(amap["attrs"]), amap["nocover"]
+    for k in roots:
+        if k[0] != "c" or k in ctx.base_fp or k[2].startswith("__") or k[2].startswith("<"):
+            continue
+        g = _resolve(k[1])
+        if g is None or not issubclass(g, bases) or cid.get(k[1]) is None:
+            continue
+        v = vars(g).get(k[2])
+        if isinstance(v, (staticmethod, classmethod)):
+            v = v.__func__
+        if not isinstance(v, types.FunctionType):
+            continue
+        a = aid.get(k[2])
+        ok, found = True, 0
+        for p in g.__mro__[1:]:
+            if k[2] not in vars(p):
+                continue
+            pc = cid.get("%s:%s" % (p.__module__, p.__qualname__))
+            kind = own.get(pc, {}).get(a) if pc is not None and a is not None else None
+            if kind != "f" or (pc * NA + a) in nocover:
+                ok = False          # the name went to something the map does not follow as a method
+            else:
+                j = key.get(pc * NA + a)
+                if j is not None:
+                    found = int.from_bytes(table[j], "little")
+            break
+        if ok:
+            acc |= found | amap["unsafe"]
+            done.add(k)
+    return acc, done
+
+
+def _dispatch_users(roots, maps):
+    """Tests that reach a changed `<expression>_sql` method of a generator class through the
+    generator's dispatch table: those that asked that table for the expression class, in the
+    class itself or in a class that inherits from it (keymap: the lookups in a dispatch table
+    are noted under the TRANSFORMS table it is built from)."""
+    gen = sys.modules.get("sqlglot.generator")
+    base = getattr(gen, "Generator", None)
+    if base is None:
+        return 0
+    acc = 0
+    ix = keymap.index(mapslib_dir())
+    for k in roots:
+        if k[0] != "c" or not k[2].endswith("_sql") or k[2].startswith("_"):
+            continue
+        g = _resolve(k[1])
+        if g is None or not issubclass(g, base):
+            continue
+        ecls = gen.exp.EXPR_CLASSES.get(k[2][:-4])
+        if ecls is None:
+            continue                      # no expression of that name: the table never holds it
+        name = keymap.keyname(ecls)
+        todo, seen = [g], set()
+        while todo:
+            d = todo.pop()
+            if d in seen:
+                continue
+            seen.add(d)
+            todo.extend(d.__subclasses__())
+            owner = next(c for c in d.__mro__ if "TRANSFORMS" in vars(c))
+            n = ix[("c", "%s:%s" % (owner.__module__, owner.__qualname__), "TRANSFORMS")]
+            t = keymap._load(mapslib_dir(), n)
+            acc |= int.from_bytes(t["whole"], "little")
+            b = t["keys"].get(name) if name is not None else None
+            if name is None:
+                raise KeyError(k)
+            if b:
+                acc |= int.from_bytes(b, "little")
+    return acc
+
+
 def roots_to_tests(roots, ctx, plan, subst=None):
     maps = ctx.maps
     acc = 0
@@ -241,11 +327,26 @@ def roots_to_tests(roots, ctx, plan, subst=None):
             acc0, roots = keymap.narrow(roots, ctx.base_keys, new_keys, mapslib_dir())
         except Exception:
             acc0 = 0
+    # methods of generator classes named <expression>_sql are also reached through the dispatch
+    # table the generator fills once per class (the attribute map leaves that filling out)
+    try:
+        acc0 |= _dispatch_users(roots, maps)
+    except Exception:
+        for k in roots:
+            if k[0] == "c" and k[2].endswith("_sql"):
+                for i in maps.types.get(k[1]) or ():
+                    acc0 |= 1 << i
     # class attributes first: maps/attrs.bin knows which tests READ an attribute of a class
     # (attrmap.py). Roots it cannot vouch for go the broad way below.
     amap = None
     try:
         amap = attrmap.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps", "attrs.bin"))
+        try:
+            more, done = _new_methods(roots, ctx, amap)
+            acc0 |= more
+            roots = set(roots) - done
+        except Exception:
+            pass
         acc, roots = attrmap.narrow(roots, amap, _resolve)
     except Exception:
         amap = None
@@ -378,6 +479,22 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
                     subst[statefp.code_digest(node.new)] = statefp.code_digest(node.old)
         fp = statefp.fingerprint(subst=subst)
         roots = statefp.changed_roots(ctx.base_fp, fp)
+        if roots and subst and not (plan.why - {"func"}):
+            # Only function bodies changed (the fresh import is here because one of them could not
+            # be given to the live function, or also runs at import). A changed function can still
+            # show up as a root when the edit changed which outer variables it closes over
+            # (`super()` gone: no __class__ cell any more). That is the same edit, and the tests
+            # that run the function are candidates through its lines already.
+            for r in list(roots):
+                try:
+                    o = _resolve(r[1]) if r[0] == "c" else sys.modules.get(r[1])
+                    v = vars(o).get(r[2]) if o is not None else None
+                    if isinstance(v, (staticmethod, classmethod)):
+                        v = v.__func__
+                    if isinstance(v, types.FunctionType) and statefp.code_digest(v.__code__) in subst:
+                        roots.discard(r)
+                except Exception:
+                    pass
         if "sqlglot" not in sys.modules or len(roots) > ROOTS_CAP:
             # the package does not import, or the import state is unrecognisable (thousands of
             # roots, and mapping them to tests alone would take most of a minute): everything
