@@ -123,7 +123,7 @@ All maps come from runs of the pinned commit. Except for `cmp.json`, the runs us
 | `types.json` | class -> tests that passed an object of it, of a subclass, or the class itself as one of the first three arguments of any Python call | `trace_types.py`, `build_maps.py --types` | class-attribute roots that `attrs.bin` does not cover |
 | `attrs.bin` | which tests read which class attribute, through which lookup class; reads made while test modules were imported; tests the recorders could not follow | `trace_attrs.py`, `build_attrs.py` | narrowing class-attribute roots (`attrmap.narrow`); `attrmap.class_readers` for the broad rule |
 | `cmp.json` | per comparison site in `sqlglot/`: the kinds of operand types seen and, for plain values, what the six comparison operators said | `trace_cmp.py` (full pytest sessions) | the comparison-operator rule (section 5) |
-| `cmp_tests.json` | per comparison site: which tests evaluated it on which kinds of operands (and what the import evaluated) | `trace_cmp_tests.py` (our runner, every test alone, two hash seeds) | narrowing the candidates of a comparison swap (section 5) |
+| `cmp_tests.json` | per comparison site: which tests evaluated it on which kinds of operands (and what the import evaluated) | `trace_cmp_tests.py` (our runner, every test alone, four hash seeds) | narrowing the candidates of a comparison swap (section 5) |
 | `units/*.bin`, `index.pkl` | for 4 giant tests: per unit and phase, lines run, CPU cost, fingerprints of what the phase hands on | `trace_units.py` | unit verdicts (section 4) |
 | `pytest_only.json` | lines a few tests run only under pytest (it builds subtest descriptions with `repr`/`str` of sqlglot objects) | not in `tools/` (see section 8) | those tests are selected unrun when such a line changes |
 | `preload.json` | names of non-sqlglot modules the tests import | not in `tools/` | imported once in the parent before any fork |
@@ -315,20 +315,25 @@ anything else, or next to a change that needs a fresh import, the commit is plan
 
 **Test by test** (`cmpeq.narrow`, `maps/cmp_tests.json`). When a swap is not harmless for every test,
 the same argument is applied to each test on its own. `trace_cmp_tests.py` rewrites the comparisons the
-same way and runs every test alone in a fork with our runner (two hash seeds, merged), noting what that
-test evaluated at every site, and what the import itself evaluated. For a file that differs from the
+same way and runs every test alone in a fork with our runner (four hash seeds, merged), noting what that
+test evaluated at every site, and what the import itself evaluated. Two sites (comparisons of hash
+values) gave a test other operands under another seed; such sites are listed as unstable and never
+narrowed. Everywhere else the four traces agree test by test. For a file that differs from the
 pinned one only by swapped operators inside functions, a candidate from line coverage is kept only if
 its own trace holds, at one of the swapped sites, operands for which the old and the new operator
 differ (or could: any pair the rule above does not accept). The other candidates ran the line but
 either never evaluated the comparison or only on operands where both operators agree, so they do what
-they did on the pinned commit. Nothing is left out when a swapped site is not in the trace at all,
-when the import evaluated it on telling operands, or for a test missing from a trace. The per-test
+they did on the pinned commit. Nothing is left out when a swapped site is not in the trace at all or
+is unstable, when the import evaluated it on telling operands, or for a test missing from a trace. The per-test
 trace reaches exactly the 1888 sites of the three pytest sessions.
 
-Checked on 186 comparison-swap mutants of our own: the rule narrowed 23 of them (candidates from 7919
-to 5546 over the set). For those 23 every candidate was then run without the rule: every failing test
-was inside the narrowed set (for example 3 failing of 3 kept out of 52, 14 of 15 kept out of 66, 47 of
-48 kept out of 51).
+Checked on comparison-swap mutants of our own. Of 186 spread over the package the rule narrowed 23
+(candidates from 7919 to 5546 over the set); a second batch of 70 was picked because the rule narrows
+them (1755 to 603). For all 93 every candidate was then run without the rule: every one of the failing
+tests (375 in the second batch alone) was inside the narrowed set, for example 3 failing of 3 kept out
+of 52, 14 of 15 kept out of 66, 47 of 48 kept out of 51. Eight of them were also run as full real
+pytest sessions: every real failure was inside the narrowed set (843 candidates narrowed to 11 with no
+failure, 230 to 1 with no failure, 66 to 15 with 13 failures).
 
 What it does not cover: comparisons no test ran; chained comparisons; any type with its own `__eq__`
 except the Z-with-None case (and there the argument assumes that `__eq__` with `None` has no side

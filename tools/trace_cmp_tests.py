@@ -12,7 +12,7 @@ then runs every test alone in a fork and writes what that test evaluated:
     {"id": test, "bad": bool, "s": {site: [[kind_a, kind_b, bits], ...]}}
 build merges traces (several hash seeds) into app/maps/cmp_tests.json:
     {"import": {site: [...]}, "sites": {site: [[kind_a, kind_b, bits, hex bitmap of tests], ...]},
-     "untraced": hex bitmap}
+     "untraced": hex bitmap, "unstable": [sites where a test saw other operands under another seed]}
 with tests numbered as in the maps. app/cmpeq.narrow uses it: a test that never evaluated a swapped
 comparison on operands that tell the two operators apart does what it did on the pinned commit.
 """
@@ -99,12 +99,16 @@ def build(tests_json, out_path, traces):
     imp = {}
     sites = {}
     seen_ok = {}          # test index -> number of traces that hold it
+    per = []              # per trace: (test index or -1 for the import, site) -> observations
     for tr in traces:
+        mine = {}
+        per.append(mine)
         for line in open(tr):
             d = json.loads(line)
             if "import" in d:
                 for site, obs in d["import"].items():
                     imp.setdefault(site, set()).update(tuple(o) for o in obs)
+                    mine[(-1, site)] = frozenset(tuple(o) for o in obs)
                 continue
             i = m.index_of(d["id"])
             if i is None or d.get("died") is not None or d.get("bad"):
@@ -112,18 +116,28 @@ def build(tests_json, out_path, traces):
             seen_ok[i] = seen_ok.get(i, 0) + 1
             for site, obs in d["s"].items():
                 s = sites.setdefault(site, {})
+                mine[(i, site)] = frozenset(tuple(o) for o in obs)
                 for o in obs:
                     s[tuple(o)] = s.get(tuple(o), 0) | (1 << i)
+    # a site where the same test saw different operands under another hash seed: what a test meets
+    # there depends on hash values or hash order, so no trace says what the scored run will meet
+    unstable = set()
+    keys = set()
+    for mine in per:
+        keys.update(mine)
+    for k in keys:
+        if len({mine.get(k) for mine in per}) > 1:
+            unstable.add(k[1])
     untraced = 0
     for i in range(len(m.tests)):
         if seen_ok.get(i, 0) != len(traces):
             untraced |= 1 << i
     res = {"import": {k: sorted(v) for k, v in sorted(imp.items())},
            "sites": {k: [list(o) + ["%x" % bm] for o, bm in sorted(v.items())] for k, v in sorted(sites.items())},
-           "untraced": "%x" % untraced, "n": len(m.tests)}
+           "untraced": "%x" % untraced, "n": len(m.tests), "unstable": sorted(unstable)}
     json.dump(res, open(out_path, "w"), separators=(",", ":"))
     print("sites", len(sites), "import sites", len(imp), "tests not traced in every run", bin(untraced).count("1"),
-          file=sys.stderr)
+          "sites that depend on the hash seed", sorted(unstable), file=sys.stderr)
 
 
 if __name__ == "__main__":

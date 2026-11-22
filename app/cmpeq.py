@@ -148,15 +148,17 @@ def narrow(sites, rel, cands, table):
     swapped comparison on operands for which the old and the new operator differ; until then it does
     what it did on the pinned commit, so that meeting is in the trace. Tests without such a record are
     left out. Nothing is left out when a site is not in the trace at all (not an instrumented
-    comparison), when the import itself evaluated a site on such operands, or on any doubt."""
+    comparison), when what a test meets there changed with the hash seed, when the import itself
+    evaluated a site on such operands, or on any doubt."""
     try:
         if not table or not sites:
             return cands
         imp, st = table.get("import", {}), table.get("sites", {})
         keep = int(table.get("untraced", "0"), 16)
+        unstable = table.get("unstable", ())
         for line, col, oa, ob in sites:
             key = "%s|%d:%d" % (rel, line, col)
-            if key not in st and key not in imp:
+            if (key not in st and key not in imp) or key in unstable:
                 return cands
             for o in imp.get(key, ()):
                 if not _agree(oa, ob, o[0], o[1], o[2] if len(o) > 2 else -1):
