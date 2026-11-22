@@ -20,6 +20,9 @@ class TestTimeout(BaseException):
     """Raised inside a test that runs far longer than it should."""
 
 
+pool_trouble = []   # pools that broke, or met a task that never ends, since the list was last cleared
+
+
 class InlinePool:
     """Stands in for ProcessPoolExecutor in the tests: a task runs at once in this process.
     Arguments and results still go through pickle, as they do on the way to a worker."""
@@ -51,30 +54,72 @@ class InlinePool:
                     self._broken = "A process in the process pool was terminated abruptly"
                     f.set_exception(BrokenProcessPool(self._broken))
                     return f
+        dead = "A process in the process pool was terminated abruptly while the future was running or pending."
         try:
-            fn2, a2, k2 = pickle.loads(pickle.dumps((fn, args, kwargs)))
+            blob = pickle.dumps((fn, args, kwargs))       # done by the submitting process
         except TestTimeout:
+            self._stuck()
             raise
         except BaseException as e:
             f.set_exception(e)
             return f
         try:
-            r = fn2(*a2, **k2)
-            r = pickle.loads(pickle.dumps(r))
+            fn2, a2, k2 = pickle.loads(blob)              # done by the worker: a failure kills it
         except TestTimeout:
+            self._stuck()
+            raise
+        except BaseException:
+            self._break(dead)
+            f.set_exception(BrokenProcessPool(dead))
+            return f
+        try:
+            r = fn2(*a2, **k2)
+        except TestTimeout:
+            self._stuck()                                  # a real worker would hang for good
             raise
         except SystemExit:
-            self._broken = "A process in the process pool was terminated abruptly"
-            f.set_exception(BrokenProcessPool(self._broken))
+            self._break(dead)
+            f.set_exception(BrokenProcessPool(dead))
+            return f
         except BaseException as e:
             try:
-                e = pickle.loads(pickle.dumps(e))
+                blob = pickle.dumps(e)                     # the worker sends the exception back
             except BaseException as e2:
-                e = e2
+                f.set_exception(e2)
+                return f
+            try:
+                e = pickle.loads(blob)                     # the pool's own thread reads it: a failure breaks the pool
+            except BaseException:
+                self._break(dead)
+                e = BrokenProcessPool(dead)
             f.set_exception(e)
-        else:
-            f.set_result(r)
+            return f
+        try:
+            blob = pickle.dumps(r)                         # the worker sends the result back
+        except TestTimeout:
+            self._stuck()
+            raise
+        except BaseException as e:
+            f.set_exception(e)
+            return f
+        try:
+            r = pickle.loads(blob)                         # read by the pool's own thread
+        except TestTimeout:
+            self._stuck()
+            raise
+        except BaseException:
+            self._break(dead)
+            f.set_exception(BrokenProcessPool(dead))
+            return f
+        f.set_result(r)
         return f
+
+    def _break(self, why):
+        self._broken = why
+        pool_trouble.append(self)
+
+    def _stuck(self):
+        pool_trouble.append(self)
 
     def map(self, fn, *iterables, timeout=None, chunksize=1):
         fs = [self.submit(fn, *a) for a in zip(*iterables)]

@@ -24,6 +24,7 @@ import statefp   # noqa: E402
 
 DATA = os.environ.get("BR_DATA", "/data")
 PER_COMMIT_WALL = float(os.environ.get("BR_WALL_PER_COMMIT", "4.6"))
+CPU_PRICE = 2.0
 LAZY_TEST = "tests/dialects/test_dialect.py::TestDialect::test_lazy_load"
 T0 = time.monotonic()
 
@@ -168,10 +169,9 @@ def warm_main(plans, ctx, wfd, wall_limit):
     core.Warm(ctx.files)
     imp_cpu = time.process_time() - t
     ref = ctx.maps.ref_import_cpu
-    if os.environ.get("BR_SCALE"):
-        ctx.scale = float(os.environ["BR_SCALE"])
-    elif ref:
-        ctx.scale = min(max(imp_cpu / ref, 0.5), 4.0)
+    # what a CPU second of a test run is charged in the run-or-select rule, against the costs in the
+    # maps. A fixed factor: measuring this machine's speed from one short import was too noisy.
+    ctx.scale = float(os.environ.get("BR_SCALE") or CPU_PRICE)
     fp = statefp.fingerprint() if any(True for _ in [1]) else None
     send(wfd, ("B", fp, ctx.scale))
     if plans:

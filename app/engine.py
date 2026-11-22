@@ -338,6 +338,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     st = _PolicyState(order, failed_now | plan.unrun, bin(failed_now).count("1"), ctx, cpu)
     hung = set()
     signal.signal(signal.SIGVTALRM, _on_alarm)
+    signal.signal(signal.SIGALRM, _on_alarm)
     signal.signal(signal.SIGPROF, _on_prof)
     try:
         import resource
@@ -368,6 +369,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             cwd = os.getcwd()
             os.chdir(farm)
         signal.setitimer(signal.ITIMER_VIRTUAL, limit, limit / 2)
+        signal.setitimer(signal.ITIMER_REAL, 4 * limit + 2)   # a test that waits instead of computing
         signal.setitimer(signal.ITIMER_PROF, 0.2, 0.2)
         timed_out = False
         try:
@@ -387,6 +389,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             timed_out = True
         finally:
             signal.setitimer(signal.ITIMER_VIRTUAL, 0)
+            signal.setitimer(signal.ITIMER_REAL, 0)
             signal.setitimer(signal.ITIMER_PROF, 0)
             if cwd is not None:
                 os.chdir(cwd)
@@ -395,6 +398,22 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         if timed_out:
             bad = True
             hung.add(key)
+        if core.pool_trouble:
+            # the tests of a class can share one worker pool (TestOptimizer.pool). In a real run a
+            # task that never ends keeps its worker, and a worker that dies breaks the pool: every
+            # later test of the class that uses the pool then fails too. They are selected unrun.
+            try:
+                tm = meta[i]
+                mod = sys.modules.get(core.module_name(tm[0]))
+                shared = getattr(getattr(mod, tm[1], None), "pool", None)
+                if any(p is shared for p in core.pool_trouble):
+                    hung.add(key)
+                    for j, m in enumerate(meta):
+                        if j != i and m[0] == tm[0] and m[1] == tm[1] and m[2] > tm[2] and j not in st.rem:
+                            out("F %d" % j)
+            except Exception:
+                pass
+            del core.pool_trouble[:]
         st.done_cls.add(key)
         if bad:
             out("F %d" % i)
@@ -402,6 +421,22 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         else:
             out("P %d" % i)
             st.passed.append(i)
+    if hung:
+        # something never ended on this commit. A candidate that was not run can hang the same way,
+        # and in a class whose tests share one worker pool that takes the later tests with it.
+        try:
+            import json
+            shared = set(json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps", "pools.json"))))
+        except Exception:
+            shared = set()
+        for key in shared:
+            f, c = key.split("::")
+            mine = [meta[i][2] for i in list(st.rem) + st.failed if meta[i][0] == f and meta[i][1] == c]
+            if mine:
+                first = min(mine)
+                for j, m in enumerate(meta):
+                    if m[0] == f and m[1] == c and m[2] > first and j not in st.rem:
+                        out("F %d" % j)
     if st.rem:
         out("U " + " ".join(str(i) for i in sorted(st.rem)))
     out("E")
