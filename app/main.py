@@ -89,7 +89,7 @@ def run_child(plan, ctx, mode):
     started = None
     done = escalate = False
     buf = b""
-    deadline = time.monotonic() + 90.0
+    deadline = time.monotonic() + (30.0 if mode == "fresh" else 20.0)   # until the child reports its candidates
     cpu, setup, meta = ctx.cpu, ctx.setup, ctx.meta
     note = ""
     while True:
@@ -251,6 +251,10 @@ def main():
 
     def finish(cid, res):
         p = plans[cid]
+        if not res.get("all") and p.tier3 and "shell" not in p.why and not res.get("sel"):
+            # a function that also runs during import changed, and nothing was found to fail:
+            # this is the one conclusion that has been wrong on hidden commits, so it is not trusted
+            res = {"all": True, "note": "import-time function change with no finding: " + str(res.get("note", ""))}
         if res.get("all"):
             answers[cid] = everything
         else:

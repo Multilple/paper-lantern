@@ -51,9 +51,19 @@ def main():
             mon.set_events(3, mon.events.PY_START)
             core.run_test(t["id"], warm.modules)
             mon.set_events(3, 0)
-            names = sorted({c.__module__ + ":" + c.__qualname__ for c in seen
-                            if isinstance(getattr(c, "__module__", None), str)
-                            and c.__module__.split(".")[0] in ("sqlglot", "tests")})
+            # the class and every class it inherits from: classes made by a metaclass share one
+            # name (type("Tokenizer", (base,), {})), so only the base names tell them apart
+            names = set()
+            for c in seen:
+                try:
+                    mro = c.__mro__
+                except Exception:
+                    mro = (c,)
+                for b in mro:
+                    m = getattr(b, "__module__", None)
+                    if isinstance(m, str) and m.split(".")[0] in ("sqlglot", "tests"):
+                        names.add(m + ":" + b.__qualname__)
+            names = sorted(names)
             os.write(w, json.dumps({"id": t["id"], "types": names}).encode())
             os._exit(0)
         os.close(w)

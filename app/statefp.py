@@ -22,7 +22,29 @@ def ours(modname):
                                          or modname == "tests" or modname.startswith("tests."))
 
 
+_code_memo = {}
+
+
+def code_digest(code):
+    """Digest of a code object without its line numbers."""
+    d = _code_memo.get(code)
+    if d is None:
+        h = hashlib.blake2b(digest_size=8)
+        h.update(code.co_code)
+        h.update(repr((code.co_names, code.co_varnames, code.co_freevars, code.co_cellvars,
+                       code.co_argcount, code.co_kwonlyargcount, code.co_flags)).encode())
+        for c in code.co_consts:
+            if isinstance(c, types.CodeType):
+                h.update(code_digest(c))
+            else:
+                h.update(repr((type(c).__name__, c)).encode("utf-8", "surrogatepass"))
+        d = _code_memo[code] = h.digest()
+    return d
+
+
 class Printer:
+    subst = {}  # digest of a function body the patch changed -> digest of its pinned body
+
     def __init__(self, loose=False):
         self.loose = loose  # order of lists, tuples and dicts does not count
         self.memo = {}
@@ -60,6 +82,8 @@ class Printer:
             put(b"<cycle>"); put(t.__name__.encode()); return
         if t is types.FunctionType:
             put(b"F"); put(("%s:%s" % (v.__module__, v.__qualname__)).encode())
+            d = code_digest(v.__code__)
+            put(self.subst.get(d, d))
             path.add(vid)
             try:
                 if v.__defaults__:
@@ -169,11 +193,12 @@ def all_classes():
     return out
 
 
-def fingerprint(loose_keys=()):
+def fingerprint(loose_keys=(), subst=None):
     """-> {("g", module, name) | ("c", "module:qualname", attr): digest}
     loose_keys: keys whose value is built in an order that depends on addresses."""
     strict = Printer()
     loose = Printer(loose=True)
+    strict.subst = loose.subst = subst or {}
     loose_keys = set(loose_keys)
 
     class _Pick:

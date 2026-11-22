@@ -283,12 +283,34 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         cands = plan.cands
         modules = None
     else:
-        warm = core.Warm(ctx.files)
+        # a patched import can loop for ever or eat memory: the same guards as for a test
+        signal.signal(signal.SIGVTALRM, _on_alarm)
+        signal.signal(signal.SIGPROF, _on_prof)
+        signal.setitimer(signal.ITIMER_VIRTUAL, 12.0 * max(ctx.scale, 1.0))
+        signal.setitimer(signal.ITIMER_PROF, 0.2, 0.2)
+        try:
+            warm = core.Warm(ctx.files)
+        finally:
+            signal.setitimer(signal.ITIMER_VIRTUAL, 0)
+            signal.setitimer(signal.ITIMER_PROF, 0)
         for i, (tf, _, _) in enumerate(ctx.meta):
             if tf in warm.import_errors:
                 failed_now |= 1 << i
-        fp = statefp.fingerprint()
+        # function bodies that the patch changed are followed through line coverage; in the
+        # fingerprint they stand for their pinned bodies, so that only other differences show
+        subst = {}
+        for tree in plan.trees.values():
+            for node in codediff.walk(tree):
+                if node.changed and node.is_function:
+                    subst[statefp.code_digest(node.new)] = statefp.code_digest(node.old)
+        fp = statefp.fingerprint(subst=subst)
         roots = statefp.changed_roots(ctx.base_fp, fp)
+        if not roots and not plan.cands and plan.why - {"func"}:
+            # code that runs at import changed, yet nothing that can be seen differs and no test
+            # runs a changed function: do not conclude "harmless" from that
+            for rel in plan.py:
+                cands_extra = ctx.maps.tests_in_file(rel)
+                plan.cands |= cands_extra
         out("N %d %s" % (len(roots), ";".join(sorted("%s|%s|%s" % k for k in roots))[:300]))
         cands = plan.cands | roots_to_tests(roots, ctx, plan)
         if plan.lazy and ctx.lazy_idx is not None and any(r in ctx.bare for r in plan.py):

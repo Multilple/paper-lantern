@@ -49,8 +49,26 @@ class Tracer:
                     s.add((fn, line))
             return mon.DISABLE
 
+        def on_start(code, off):
+            # no LINE event is raised for instructions on the line a code object starts on (a one-line
+            # lambda or def raises none at all): entering the code counts for its first lines
+            # (same rule as tools/trace.py)
+            fn = code.co_filename
+            if fn.startswith(ROOT) and not fn.startswith(UP):
+                s = cur[0]
+                if s is not None:
+                    first = code.co_firstlineno
+                    s.add((fn, first))
+                    for _, _, l in code.co_lines():
+                        if l is not None:
+                            s.add((fn, l))
+                            if l != first:
+                                break
+            return mon.DISABLE
+
         mon.register_callback(3, mon.events.LINE, on_line)
-        mon.set_events(3, mon.events.LINE)
+        mon.register_callback(3, mon.events.PY_START, on_start)
+        mon.set_events(3, mon.events.LINE | mon.events.PY_START)
         self.on = True
         opened = self.opened
 

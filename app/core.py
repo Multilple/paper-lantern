@@ -122,11 +122,15 @@ class Warm:
         for n in names:
             try:
                 importlib.import_module(n)
+            except TestTimeout:
+                raise
             except BaseException:
                 pass
         for f in test_files:
             try:
                 self.modules[f] = importlib.import_module(module_name(f))
+            except TestTimeout:
+                raise
             except BaseException as e:  # a test file that cannot be imported fails all its tests
                 self.import_errors[f] = repr(e)
         global _registry_full
