@@ -49,8 +49,9 @@ before sqlglot is imported (only third-party modules from `maps/preload.json` ar
 memory limit is set first, then `SourceFileLoader.get_code` is replaced so that changed files compile from
 their patched text (once per file: a module that fails to import is not compiled again by each later
 importer), then sqlglot and all test modules are imported. A test module that fails to import fails all
-its tests. If `sqlglot` itself does not import, or more than 3000 roots (below) changed, every test is
-selected at once. Otherwise `statefp.py` takes a fingerprint of the import state: one digest for every
+its tests. If `sqlglot` itself does not import, if 200 or more tests already fail because their files do
+not import, or if more than 800 roots (below) changed, every test is selected at once: such a commit
+costs about as much as every test whatever else is found, and looking further only costs CPU. Otherwise `statefp.py` takes a fingerprint of the import state: one digest for every
 module global and every class attribute of `sqlglot.*` and `tests.*` (values walked structurally,
 functions by a digest of their code, classes by name and bases). Function bodies the patch changed are
 digested as their pinned bodies, so only other differences show. The differing keys ("roots") become
@@ -208,6 +209,7 @@ recorded seconds per CPU second, cheapest first, select the rest" for L on a gri
 using `pack.bound` (the least any split can cost) for the selected part and the posterior of `q` after
 each observed pass or failure. The cheapest test of the best plan runs if that plan beats stopping now;
 otherwise the remaining candidates are selected unrun. A `setUpClass` cost is charged once per class.
+Tests that fail without a run (their file does not import) count as observed failures.
 
 `pack.pack` tries every worker count from 1 to 8, places tests longest first on the least loaded worker,
 then moves and swaps tests out of the fullest worker while that lowers the maximum, and keeps the
@@ -316,12 +318,15 @@ order, time or addresses is covered only as far as the three traced sessions met
 
 ## 6. Safety nets
 
-- **Per test**: a CPU timer of `max(4, min(15c, 2c + 4)) x 1.4` s, where `c` is the test's recorded
-  CPU plus its class set-up, so about twice the usual time for slow tests; a wall timer of 4 times that
-  plus 2 s. A test that swallows the timeout is interrupted again every 0.03 CPU s. A timed-out test is
-  selected, and later candidates of its class in that commit are selected without a run.
+- **Per test**: a CPU timer of `max(2.5, min(15c, 2c + 4)) x 1.4` s, where `c` is the test's recorded
+  CPU plus its class set-up, and never more than its usual time again over its usual time (4 x 1.4 s for
+  a short test); a wall timer of 4 times that plus 2 s. A test that swallows the timeout is interrupted
+  again every 0.03 CPU s. A timed-out test is selected, and the commit stops there: the patch makes code
+  hang, every further hang would cost seconds of CPU, so the remaining candidates are selected unrun.
+  A limit that is too tight can only select a test that would have passed, never leave one out.
 - **Per commit**: tests stop once the commit has used 12 x 1.4 s of CPU beyond the recorded cost of what
-  it ran; the rest are selected unrun. A fresh import has its own 12 x 1.4 s CPU limit.
+  it ran; the rest are selected unrun. A fresh import has its own 2.5 x 1.4 s CPU limit (the pinned
+  import takes about 0.3 s).
 - **Whole run**: after 4.6 s per commit of wall time, remaining commits select their candidates (swap)
   or everything (import-time) without running; no test runs past 5.2 s per commit minus 1 s.
 - **Memory**: `RLIMIT_DATA` of 3200 MB is set in every child before any patched code runs (a fresh

@@ -35,7 +35,8 @@ SENTINEL_CPU = 3.0    # map CPU seconds of the other candidates, at most
 SENTINEL_MIN = int(os.environ.get("BR_SENTINEL_MIN", "10"))   # 0 turns the rule off
 UNITS_GAIN = 0.9      # decide a giant unit by unit when that is expected to cost less than this share of a run
 POLICY_MODEL = policy.Model(0.15, 0.2, 0.1, small=(0.0, 5.0, 0.5), small_n=2)
-TIMEOUT_MIN = 4.0
+TIMEOUT_MIN = 2.5
+IMPORT_LIMIT = 2.5    # CPU seconds for the fresh import of a patched tree (the pinned one takes about 0.3)
 TIMEOUT_FACTOR = 15.0
 # Waiting for a slow test costs CPU seconds one for one, and selecting it without a verdict costs
 # at most its own time, so a test is given up on once it has used about twice its usual time.
@@ -44,7 +45,8 @@ TIMEOUT_SLACK = 4.0
 # all the tests of one commit together may run this much longer than they usually do
 COMMIT_OVERRUN = 12.0
 # more changed roots than this after a fresh import: the import broke, every test is selected
-ROOTS_CAP = int(os.environ.get("BR_ROOTS_CAP", "3000"))
+ROOTS_CAP = int(os.environ.get("BR_ROOTS_CAP", "800"))
+MASS_FAIL = 200     # tests that fail at import, from which on a commit is not looked at further
 
 
 def test_limit(c, scale):
@@ -468,7 +470,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         # a patched import can loop for ever or eat memory: the same guards as for a test
         signal.signal(signal.SIGVTALRM, _on_alarm)
         signal.signal(signal.SIGPROF, _on_prof)
-        signal.setitimer(signal.ITIMER_VIRTUAL, 12.0 * max(ctx.scale, 1.0))
+        signal.setitimer(signal.ITIMER_VIRTUAL, IMPORT_LIMIT * max(ctx.scale, 1.0))
         signal.setitimer(signal.ITIMER_PROF, 0.2, 0.2)
         try:
             warm = core.Warm(ctx.files)
@@ -478,6 +480,15 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         for i, (tf, _, _) in enumerate(ctx.meta):
             if tf in warm.import_errors:
                 failed_now |= 1 << i
+        if bin(failed_now).count("1") >= MASS_FAIL:
+            # hundreds of tests already fail because their files cannot be imported: the commit
+            # costs about as much as every test whatever else is found. Everything, no more work.
+            for i in bits(failed_now):
+                out("F %d" % i)
+            out("L")
+            out("U " + " ".join(str(i) for i in range(len(ctx.meta)) if not (failed_now >> i) & 1))
+            out("E")
+            return
         # function bodies that the patch changed are followed through line coverage; in the
         # fingerprint they stand for their pinned bodies, so that only other differences show
         subst = {}
@@ -504,8 +515,8 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
                 except Exception:
                     pass
         if "sqlglot" not in sys.modules or len(roots) > ROOTS_CAP:
-            # the package does not import, or the import state is unrecognisable (thousands of
-            # roots, and mapping them to tests alone would take most of a minute): everything
+            # the package does not import, or the import state is unrecognisable (hundreds of
+            # roots, and mapping them to tests alone takes seconds): everything
             for i in bits(failed_now):
                 out("F %d" % i)
             out("L")
@@ -582,7 +593,13 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     allowance = COMMIT_OVERRUN * max(scale, 1.0)
     usual = 0.0
     t_begin = time.process_time()
+    stop_hang = False
     while st.rem:
+        if stop_hang and not TRUTH:
+            # one test never ended: the patch makes code hang, and every further hang costs seconds
+            # of CPU. The rest is selected without a run.
+            out("N stopped: a test did not end")
+            break
         over = max(0.0, (time.process_time() - t_begin) - usual)
         if not TRUTH and (over >= allowance or (hard is not None and time.monotonic() > hard - 1.0)):
             out("N stopped: %.1fs over the usual time" % over)
@@ -610,7 +627,10 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         limit = test_limit(ctx.cpu[i] + setup.get(key, 0.0), scale)
         if i in ucost:   # deciding unit by unit must not cost more than selecting the test does
             limit = min(limit, (ctx.cpu[i] + TIMEOUT_SLACK) * max(scale, 1.0))
-        limit = max(1.0, min(limit, c_usual * max(scale, 1.0) + (allowance - over)))
+        # over its usual time a test gets what is left of the commit's allowance, and never more
+        # than its usual time again (4 s for a short one): a hang is cut early, a slow machine is not
+        limit = max(1.0, min(limit, c_usual * max(scale, 1.0)
+                             + min(allowance - over, max(4.0, c_usual) * max(scale, 1.0))))
         if i in ucost and (UNITS_ALWAYS or TRUTH):
             limit = max(limit, UNITS_LIMIT)
         if TRUTH:
@@ -656,6 +676,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         if timed_out:
             bad = True
             hung.add(key)
+            stop_hang = True
         if core.pool_trouble:
             # the tests of a class can share one worker pool (TestOptimizer.pool). In a real run a
             # task that never ends keeps its worker, and a worker that dies breaks the pool: every

@@ -84,8 +84,11 @@ def decide_next(st, model=DEFAULT):
     B_tot = sum(secs[i] for i in base)
     B_long = max((secs[i] for i in base), default=0)
     B_n = len(base)
-    m = len(st.passed) + len(st.failed)
-    r = len(st.failed) + getattr(st, "n_forced_fail", 0)
+    # tests known to fail without a run (their file cannot be imported) are verdicts like the others:
+    # they count as runs, or the pass count below would go negative
+    nf = getattr(st, "n_forced_fail", 0)
+    m = len(st.passed) + len(st.failed) + nf
+    r = len(st.failed) + nf
     if "n0" not in memo:
         memo["n0"] = len(rem) + m
     pi, a, b = model.params(memo["n0"])
