@@ -190,14 +190,28 @@ def roots_to_tests(roots, ctx, plan):
     cnames = {k[1] for k in roots if k[0] == "c"}
     if cnames:
         cobjs = {o for o in (_resolve(n) for n in cnames) if o is not None}
+        touched = set()   # changed classes that some test is known to touch
         for kname, tests in maps.types.items():
             hit = kname in cnames
+            k = None
             if not hit:
                 k = _resolve(kname)
                 hit = k is None or any(c in cobjs for c in k.__mro__)
             if hit:
                 for i in tests:
                     acc |= 1 << i
+                if kname in cnames:
+                    touched.add(kname)
+                elif k is not None:
+                    for c in k.__mro__:
+                        if c in cobjs:
+                            touched.add("%s:%s" % (c.__module__, c.__qualname__))
+        for n in cnames - touched:
+            # no test is recorded as touching this class: fall back to every test that runs a
+            # line of the file that defines it
+            rel = n.split(":")[0].replace(".", "/")
+            for cand in (rel + ".py", rel + "/__init__.py"):
+                acc |= maps.tests_in_file(cand)
         for n in cnames:
             if n.startswith("tests."):
                 f = n.split(":")[0].replace(".", "/") + ".py"

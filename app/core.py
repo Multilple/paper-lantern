@@ -129,6 +129,11 @@ class Warm:
                 self.modules[f] = importlib.import_module(module_name(f))
             except BaseException as e:  # a test file that cannot be imported fails all its tests
                 self.import_errors[f] = repr(e)
+        global _registry_full
+        try:
+            _registry_full = dict(sys.modules["sqlglot.dialects.dialect"].Dialect._classes)
+        except Exception:
+            _registry_full = None
 
 
 class _Enough(BaseException):
@@ -175,6 +180,52 @@ def class_state(meta):
     return _class_ready.get(cls)
 
 
+POLLUTER = "test_dialect_entry_points.py"
+_registry_full = None
+_collection_keys = None
+
+
+def _load_collection_keys():
+    global _collection_keys
+    if _collection_keys is None:
+        import json
+        d = os.environ.get("BR_MAPS", os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps"))
+        try:
+            _collection_keys = json.load(open(os.path.join(d, "session.json")))
+        except Exception:
+            _collection_keys = [""]
+    return _collection_keys
+
+
+def session_state(test_file):
+    """Puts the dialect registry in the state a test meets at its place in a real one-process
+    session, as far as that changes which code runs.
+    - pytest imports every test file first; that registers only the dialects those imports load
+      (maps/session.json, recorded on the pinned commit). Any other dialect is loaded through
+      Dialect._try_load the first time a test names it.
+    - tests/test_dialect_entry_points.py empties the registry in setUp and tearDown, so every test
+      that runs after that file starts from an empty registry.
+    Every test here starts from the smallest registry it can meet: the collection-time one before
+    that file, the empty one from that file on."""
+    global _registry_full
+    try:
+        mod = sys.modules.get("sqlglot.dialects.dialect")
+        if mod is None:
+            return
+        reg = mod.Dialect._classes
+        if _registry_full is None:
+            _registry_full = dict(reg)
+        d, name = os.path.split(test_file)
+        reg.clear()
+        if not (d == "tests" and name >= POLLUTER):
+            full = _registry_full
+            for k in _load_collection_keys():
+                if k in full:
+                    reg[k] = full[k]
+    except Exception:
+        pass
+
+
 def prepare_class(test_id, modules=None):
     """Runs setUpClass once per class per process. -> the class, or None when it cannot be used."""
     f, c, m = split_id(test_id)
@@ -205,6 +256,7 @@ def run_test(test_id, modules=None):
     """True when the test fails."""
     _timed_out[0] = False
     try:
+        session_state(test_id.split("::", 1)[0])
         cls = prepare_class(test_id, modules)
         if cls is None:
             return True

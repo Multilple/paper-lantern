@@ -19,8 +19,16 @@ def main():
         return mon.DISABLE
     def on_start(code, off):
         fn = code.co_filename
-        if fn.startswith(ROOT) and code.co_flags & 1:
-            called.add((fn[len(ROOT):], code.co_qualname, code.co_firstlineno))
+        if fn.startswith(ROOT):
+            if code.co_flags & 1:
+                called.add((fn[len(ROOT):], code.co_qualname, code.co_firstlineno))
+            s = lines.setdefault(fn, set())
+            s.add(code.co_firstlineno)
+            for _, _, l in code.co_lines():
+                if l is not None:
+                    s.add(l)
+                    if l != code.co_firstlineno:
+                        break
         return mon.DISABLE
     mon.register_callback(3, mon.events.LINE, on_line)
     mon.register_callback(3, mon.events.PY_START, on_start)

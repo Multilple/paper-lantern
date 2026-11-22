@@ -164,7 +164,9 @@ def warm_main(plans, ctx, wfd, wall_limit):
     core.Warm(ctx.files)
     imp_cpu = time.process_time() - t
     ref = ctx.maps.ref_import_cpu
-    if ref:
+    if os.environ.get("BR_SCALE"):
+        ctx.scale = float(os.environ["BR_SCALE"])
+    elif ref:
         ctx.scale = min(max(imp_cpu / ref, 0.5), 4.0)
     fp = statefp.fingerprint() if any(True for _ in [1]) else None
     send(wfd, ("B", fp, ctx.scale))
