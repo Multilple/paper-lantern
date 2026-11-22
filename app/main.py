@@ -369,6 +369,9 @@ def _main(out_fd):
                     i = maps.tests.index(tid)
                     if (res["sel"] >> i) & 1 and not (res["failing"] >> i) & 1 and number[i] in answers[cid]:
                         answers[cid] = [x for x in answers[cid] if x != number[i]]
+            if "obs_only" in probe and res.get("failing"):
+                # commits where a failure was seen and the rest was selected unrun: what the rest costs
+                answers[cid] = sorted(number[i] for i in mapslib.bits(res["failing"]) if number[i] is not None)
             if ("blind_t3" if p.tier3 else "blind_swap") in probe and "failing" in res and not res["failing"]:
                 ms = [ctx.seconds_ms[i] for i in mapslib.bits(res["sel"])]
                 if ms and pack.bound(sum(ms), max(ms), len(ms)) >= 5000:
