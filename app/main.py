@@ -236,8 +236,9 @@ def main():
         pass
     answers = {}   # cid -> list of numbers
     for cid, p in plans.items():
-        cat = "none" if p.kind == "none" else "all" if p.kind == "all" else "tier3" if p.tier3 else \
-            "swap" if p.py else "data"
+        cat = "none" if p.kind == "none" else "all" if p.kind == "all" else "swap" if (p.py and not p.tier3) else \
+            "data" if not p.tier3 else "t3shell" if "shell" in p.why else \
+            "t3func" if p.why == {"func"} else "t3other"
         if cat in probe:
             p.kind, p.reason = "all", "probe"
         if p.kind == "none":

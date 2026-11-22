@@ -246,6 +246,24 @@ def _on_alarm(signum, frame):
     raise core.TestTimeout()
 
 
+RSS_LIMIT = int(float(os.environ.get("BR_RSS_MB", "1300")) * 1024 * 1024)
+DATA_LIMIT = int(float(os.environ.get("BR_DATA_MB", "2600")) * 1024 * 1024)
+_PAGE = os.sysconf("SC_PAGE_SIZE")
+
+
+def _on_prof(signum, frame):
+    """A patch can make a test allocate without bound (a join that explodes). The container has
+    4 GB and going over it rejects the whole run, so a test that grows far past anything the
+    pinned tests need is stopped and counts as failing."""
+    try:
+        with open("/proc/self/statm") as f:
+            rss = int(f.read().split()[1]) * _PAGE
+    except Exception:
+        return
+    if rss > RSS_LIMIT:
+        raise core.TestTimeout()
+
+
 def run_commit(plan, ctx, wfd, mode, tmpdir):
     """mode "swap": forked from the warm process. mode "fresh": forked before sqlglot was imported."""
     def out(s):
@@ -298,6 +316,12 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     R += sum(setup.get(k, 0.0) for k in classes) * scale
     hung = set()
     signal.signal(signal.SIGVTALRM, _on_alarm)
+    signal.signal(signal.SIGPROF, _on_prof)
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_DATA, (DATA_LIMIT, DATA_LIMIT))
+    except Exception:
+        pass
     farm = None
     pos = 0
     n = len(order)
@@ -331,6 +355,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             cwd = os.getcwd()
             os.chdir(farm)
         signal.setitimer(signal.ITIMER_VIRTUAL, limit, limit / 2)
+        signal.setitimer(signal.ITIMER_PROF, 0.2, 0.2)
         timed_out = False
         try:
             bad = core.run_test("%s::%s::%s" % meta[i], modules)
@@ -339,6 +364,7 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             timed_out = True
         finally:
             signal.setitimer(signal.ITIMER_VIRTUAL, 0)
+            signal.setitimer(signal.ITIMER_PROF, 0)
             if cwd is not None:
                 os.chdir(cwd)
         if core.last_timed_out():

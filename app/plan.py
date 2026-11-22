@@ -16,6 +16,7 @@ class Plan:
         self.data = {}          # relpath -> patched text, for files that tests read
         self.trees = {}         # relpath -> codediff root, when function code changed
         self.tier3 = False      # code that runs at import changed: needs a fresh import
+        self.why = set()        # why tier3: shell | func | syntax | incomparable | dataimp
         self.cands = 0          # bitmap of the tests that can be affected, as far as known here
         self.unrun = 0          # bitmap of tests selected without a run
         self.lazy = False       # the test that starts "python -c 'import sqlglot'" can be affected
@@ -63,6 +64,7 @@ def make_plan(cid, text, maps, root):
         readers = opened.get(rel, [])
         if rel in imp["opened"]:
             plan.tier3 = True
+            plan.why.add("dataimp")
             plan.data[rel] = new
         if rel.endswith(".py") and rel.startswith(PKG):
             plan.py[rel] = new
@@ -93,6 +95,11 @@ def make_plan(cid, text, maps, root):
                         plan.cands |= 1 << i
             if kind in ("syntax", "incomparable"):
                 plan.tier3 = True
+                plan.why.add(kind)
+                if kind == "incomparable":
+                    # functions were added or removed: no pairing of old and new code, so every
+                    # test that runs a line of the file can be affected
+                    plan.cands |= maps.tests_in_file(rel)
             elif kind == "tree":
                 plan.trees[rel] = tree
                 ilines = imp["lines"].get(rel, set())
@@ -101,12 +108,14 @@ def make_plan(cid, text, maps, root):
                         continue
                     if not node.is_function:
                         plan.tier3 = True
+                        plan.why.add("shell")
                         continue
                     plan.cands |= maps.tests_on_lines(rel, node.lines)
                     x = node
                     while x is not None and x.is_function:
                         if (rel, x.old.co_qualname, x.old.co_firstlineno) in imp["called"] and (node.lines & ilines):
                             plan.tier3 = True  # the changed lines also ran during import
+                            plan.why.add("func")
                         x = x.parent
             if readers:
                 plan.data[rel] = new
