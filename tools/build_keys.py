@@ -30,10 +30,21 @@ def main():
             if tags is None:
                 tags, unsafe, imported = head["tags"], head["unsafe"], head.get("imported", {})
             else:
-                assert tags == head["tags"] and unsafe == head["unsafe"], "traces of different table sets"
+                # the tables are found in the same order whatever the seed; a table that is unsafe
+                # or read at import in any trace is so in the map
+                assert [sorted(map(tuple, t)) for t in tags] == [sorted(map(tuple, t)) for t in head["tags"]], \
+                    "traces of different table sets"
+                unsafe.update(head["unsafe"])
+                for i, fs in head.get("imported", {}).items():
+                    imported[i] = sorted(set(imported.get(i, [])) | set(fs))
             for line in f:
                 recs.append(json.loads(line))
-    assert len(recs) == len(tests), (len(recs), len(tests))
+    # several traces of one test (other hash seeds: the order a set is walked in can steer which
+    # keys are asked for) are merged: a test asked for a key if it did in any of them
+    seen = {}
+    for r in recs:
+        seen[r["id"]] = seen.get(r["id"], 0) + 1
+    assert set(seen) == {t["id"] for t in tests} and len(set(seen.values())) == 1, "incomplete traces"
     bad = [r["id"] for r in recs if r.get("bad") or "died" in r]
     assert not bad, bad[:5]
     whole = [0] * len(tags)

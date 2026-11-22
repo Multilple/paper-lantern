@@ -22,6 +22,7 @@ class Plan:
         self.unrun = 0          # bitmap of tests selected without a run
         self.lazy = False       # the test that starts "python -c 'import sqlglot'" can be affected
         self.eq = []            # files whose only change is a swapped comparison that changes nothing
+        self.eq_dropped = []    # the same, at class or module level: left out of the patch altogether
 
 
 def _all(plan, why):
@@ -39,9 +40,15 @@ def _bitmap(idxs):
 
 def make_plan(cid, text, maps, root):
     plan = _make_plan(cid, text, maps, root, True)
-    if plan.eq and (plan.tier3 or plan.cands or plan.unrun or plan.data or plan.kind == "all"):
-        # the proof that a swapped comparison changes nothing rests on what the pinned commit does:
-        # with any other change in the same commit it is not used
+    # The proof that a swapped comparison changes nothing rests on what the tests do on the pinned
+    # commit. Next to other changes it still holds for every test those changes do not reach (such
+    # a test does what it did on the pinned commit), and the tests they do reach are candidates
+    # anyway and run with the whole patch, swapped comparison included. That needs the swap to be
+    # inside functions, so that it is applied like any other function edit; and it is not used
+    # next to a change that takes a fresh import.
+    if plan.eq_dropped and (plan.tier3 or plan.cands or plan.unrun or plan.data or plan.kind == "all" or plan.trees):
+        plan = _make_plan(cid, text, maps, root, False)
+    elif plan.eq and (plan.tier3 or plan.kind == "all"):
         plan = _make_plan(cid, text, maps, root, False)
     return plan
 
@@ -79,7 +86,14 @@ def _make_plan(cid, text, maps, root, use_cmp):
             plan.data[rel] = new
         if use_cmp and rel.endswith(".py") and rel.startswith("sqlglot/") and not readers \
                 and rel not in imp["opened"] and cmpeq.unchanged(old, new, rel, maps.cmp):
-            plan.eq.append(rel)
+            kind, tree = codediff.compare(old, new, path)
+            if kind == "tree" and all(n.is_function for n in codediff.walk(tree) if n.own_changed):
+                # applied with the rest of the patch, but it brings no candidates of its own
+                plan.py[rel] = new
+                plan.trees[rel] = tree
+                plan.eq.append(rel)
+            else:
+                plan.eq_dropped.append(rel)
             continue
         if rel.endswith(".py") and rel.startswith(PKG):
             plan.py[rel] = new

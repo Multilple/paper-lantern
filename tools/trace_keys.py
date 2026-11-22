@@ -216,7 +216,7 @@ class RecDict(dict):
 
 
 def _plain(o):
-    return o._d if isinstance(o, (RecSet, RecFrozen)) else o
+    return o._d if type(o) in (RecSet, RecFrozen) else o
 
 
 def _set_methods(ns, mutable):
@@ -270,14 +270,19 @@ def _set_methods(ns, mutable):
     ns["__deepcopy__"] = __deepcopy__
 
 
-class RecSet(set):
-    """A class-level set, the same way: elements in _d, the set itself empty."""
+class RecSet:
+    """Stands in for a class-level or module-level set. It is NOT a set: C code that is handed a real
+    set reads its storage directly (`d.keys() - S`, `set(S)`, `a.issubset(S)`), which no subclass can
+    note; handed this object, the same C code has to iterate it or call its methods, and every one
+    of those is noted. isinstance(x, set) still answers True (through __class__)."""
     __slots__ = ("_br_tag", "_d")
+    __class__ = property(lambda self: set)
     _set_methods(locals(), True)
 
 
-class RecFrozen(frozenset):
+class RecFrozen:
     __slots__ = ("_br_tag", "_d")
+    __class__ = property(lambda self: frozenset)
     _set_methods(locals(), False)
 
 
@@ -287,18 +292,17 @@ def _wrap(v, tag):
         r = RecDict()
         r._d = dict(v)
     elif t is set:
-        r = RecSet()
+        r = object.__new__(RecSet)
         r._d = set(v)
     else:
-        r = RecFrozen()
+        r = object.__new__(RecFrozen)
         r._d = frozenset(v)
     r._br_tag = tag
     return r
 
 
-# Sets are left alone unless BR_KEY_SETS=1: C code reads a set that is passed to it straight from its
-# storage (`d.keys() - S`, `set(S)`, `a.issubset(S)`), so a wrapped set cannot note every read.
-# The empty-storage wrappers showed exactly that (one test failed on `kwargs.keys() - SUPPORTED_SETTINGS`).
+# Sets are covered only with BR_KEY_SETS=1 (see RecSet: a subclass of set cannot note every read; the
+# empty-storage wrappers showed exactly that, one test failed on `kwargs.keys() - SUPPORTED_SETTINGS`).
 _KINDS = (dict, set, frozenset) if os.environ.get("BR_KEY_SETS") == "1" else (dict,)
 
 
