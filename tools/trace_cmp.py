@@ -4,8 +4,10 @@
 
 Copies REPO to TREE, rewrites every `a is b`, `a is not b`, `a == b`, `a != b` in sqlglot/ so that the
 types of both operands are noted when the comparison runs, runs the real pytest session in TREE, and
-writes   {relpath: {"line:col": [[kind_a, kind_b], ...]}}   to OUT.json (line and col are those of the
-comparison in the pinned source).  A type is recorded as the way its == works:
+writes   {relpath: {"line:col": [[kind_a, kind_b, bits], ...]}}   to OUT.json (line and col are those
+of the comparison in the pinned source; the ordering comparisons < <= > >= are noted too).  bits is
+-1, or, for two plain values of one sort (numbers, strings, tuples of them), what the six comparisons
+== != < <= > >= say about them (1, 2, 4, 8, 16, 32).  A type is recorded as the way its == works:
 
     N  None                      B  bool
     O  == is identity (the type does not define __eq__ or __ne__)
@@ -24,7 +26,7 @@ import shutil
 import subprocess
 import sys
 
-OPS = {ast.Is: 0, ast.IsNot: 1, ast.Eq: 2, ast.NotEq: 3}
+OPS = {ast.Is: 0, ast.IsNot: 1, ast.Eq: 2, ast.NotEq: 3, ast.Lt: 4, ast.LtE: 5, ast.Gt: 6, ast.GtE: 7}
 
 RECORDER = r'''
 import atexit, enum, json, os, weakref
@@ -52,6 +54,24 @@ def _kind(t):
     except Exception:
         pass
     return "X"
+
+
+_NUM = (int, float, bool)
+_FLAT = (int, float, bool, str, bytes)
+
+
+def _plain(t):
+    """a short tuple of numbers, strings and such tuples"""
+    if len(t) > 16:
+        return False
+    for x in t:
+        tx = type(x)
+        if tx in _FLAT:
+            continue
+        if tx is tuple and len(x) <= 16 and all(type(y) in _FLAT for y in x):
+            continue
+        return False
+    return True
 
 
 def c(site, a, b, op):
@@ -87,17 +107,34 @@ def c(site, a, b, op):
             pass
         finally:
             _busy[0] = False
+    # plain values of one sort (numbers, or strings, or tuples of them): what each of the six
+    # ordering comparisons says about them, as bits  == != < <= > >=
+    m = -1
+    if op >= 2 and ((ta in _NUM and tb in _NUM) or (ta is tb and (ta is str or ta is bytes or (ta is tuple and _plain(a) and _plain(b))))):
+        try:
+            m = (1 if a == b else 0) | (2 if a != b else 0) | (4 if a < b else 0) | (8 if a <= b else 0) \
+                | (16 if a > b else 0) | (32 if a >= b else 0)
+        except Exception:
+            m = -1
     s = _seen.get(site)
     if s is None:
         s = _seen[site] = set()
-    s.add((ka, kb))
+    s.add((ka, kb, m))
     if op == 0:
         return a is b
     if op == 1:
         return a is not b
     if op == 2:
         return a == b
-    return a != b
+    if op == 3:
+        return a != b
+    if op == 4:
+        return a < b
+    if op == 5:
+        return a <= b
+    if op == 6:
+        return a > b
+    return a >= b
 
 
 def _dump():
