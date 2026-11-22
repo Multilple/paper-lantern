@@ -26,6 +26,15 @@ DATA = os.environ.get("BR_DATA", "/data")
 PER_COMMIT_WALL = float(os.environ.get("BR_WALL_PER_COMMIT", "4.6"))
 HARD_PER_COMMIT = float(os.environ.get("BR_HARD_PER_COMMIT", "5.2"))
 CPU_PRICE = 1.4
+MARKERS = ("tests/dialects/test_athena.py::TestAthena::test_func_builder",
+           "tests/dialects/test_athena.py::TestAthena::test_create_table",
+           "tests/dialects/test_athena.py::TestAthena::test_dml",
+           "tests/dialects/test_bigquery.py::TestBigQuery::test_pushdown_cte_column_names",
+           "tests/dialects/test_bigquery.py::TestBigQuery::test_array_distinct_fold",
+           "tests/dialects/test_pipe_syntax.py::TestPipeSyntax::test_set_operators",
+           "tests/dialects/test_mysql.py::TestMySQL::test_ddl",
+           "tests/dialects/test_spark.py::TestSpark::test_spark",
+           "tests/dialects/test_duckdb.py::TestDuckDB::test_duckdb")     # measurement builds only
 LAZY_TEST = "tests/dialects/test_dialect.py::TestDialect::test_lazy_load"
 T0 = time.monotonic()
 
@@ -110,6 +119,7 @@ def run_child(plan, ctx, mode):
     unrun = 0
     started = None
     done = escalate = False
+    mark = 0
     buf = b""
     deadline = time.monotonic() + (30.0 if mode == "fresh" else 20.0)   # until the child reports its candidates
     if ctx.hard is not None:
@@ -172,6 +182,8 @@ def run_child(plan, ctx, mode):
                 escalate = True
             elif tag == "N":
                 note = line
+            elif tag == "M":
+                mark = int(line[2:])
             elif tag == "!":
                 note = line
         if done:
@@ -194,7 +206,7 @@ def run_child(plan, ctx, mode):
         return {"escalate": True}
     if done:
         return {"sel": failing | unrun | plan.unrun, "note": note, "ran": bin(failing | passed).count("1"),
-                "cands": cands if isinstance(cands, int) else 0, "failing": failing, "passed": passed}
+                "cands": cands if isinstance(cands, int) else 0, "failing": failing, "passed": passed, "mark": mark}
     if not isinstance(cands, int):
         return {"all": True, "note": "child lost before it knew the candidates: " + note}
     if started is not None:
@@ -328,6 +340,8 @@ def _main(out_fd):
         probe = set(json.load(open(os.path.join(HERE, "probe.json"))))
     except Exception:
         pass
+    if "mark" in probe:
+        os.environ["BR_MARK"] = "1"
     answers = {}   # cid -> list of numbers
     _STATE.update(cids=cids, answers=answers, everything=everything, ms=ms, forced=forced)
     for cid, p in plans.items():
@@ -369,6 +383,12 @@ def _main(out_fd):
                     i = maps.tests.index(tid)
                     if (res["sel"] >> i) & 1 and not (res["failing"] >> i) & 1 and number[i] in answers[cid]:
                         answers[cid] = [x for x in answers[cid] if x != number[i]]
+            if "mark" in probe and res.get("mark"):
+                for b, tid in enumerate(MARKERS):
+                    if (res["mark"] >> b) & 1 and tid in known:
+                        n_ = number[maps.tests.index(tid)]
+                        if n_ is not None and n_ not in answers[cid]:
+                            answers[cid] = sorted(answers[cid] + [n_])
             if "obs_only" in probe and res.get("failing"):
                 # commits where a failure was seen and the rest was selected unrun: what the rest costs
                 answers[cid] = sorted(number[i] for i in mapslib.bits(res["failing"]) if number[i] is not None)

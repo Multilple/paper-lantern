@@ -27,7 +27,8 @@ THETA_CLEAN = float(os.environ.get("BR_THETA_CLEAN", "0.75"))   # nothing has fa
 THETA_DIRTY = float(os.environ.get("BR_THETA_DIRTY", "0.9"))    # something already failed
 UNITS_ALWAYS = os.environ.get("BR_UNITS_ALWAYS", "0") == "1"
 UNITS_LIMIT = 80.0
-TRUTH = os.environ.get("BR_TRUTH") == "1"
+TRUTH = os.environ.get("BR_TRUTH") in ("1", "2")
+TRUTH_ALL = os.environ.get("BR_TRUTH") == "2"     # do not stop at the first failure
 GIANT_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
 GIANT_DEAR = 4.0      # CPU seconds: a unit verdict dearer than this is not taken when the rule below applies
 SENTINEL_CPU = 3.0    # map CPU seconds of the other candidates, at most
@@ -565,6 +566,9 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     st = _PolicyState([i for i in order if i != giant], failed_now | plan.unrun, bin(failed_now).count("1"),
                       ctx, pol_cpu)
     hung = set()
+    truth_skip = TRUTH and sum(ctx.cpu[i] for i in order) > float(os.environ.get("BR_TRUTH_CAP", "1e9"))
+    if truth_skip:
+        out("N toobig")
     signal.signal(signal.SIGVTALRM, _on_alarm)
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.signal(signal.SIGPROF, _on_prof)
@@ -587,9 +591,11 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             act = policy.decide_next(st, POLICY_MODEL)
         except Exception:
             act = ("stop",)
-        if TRUTH or giant is not None:
+        if truth_skip:
+            act = ("stop",)
+        elif TRUTH or giant is not None:
             # (offline labelling, or the rule above) every candidate, cheapest first, until one fails
-            act = ("stop",) if st.failed else ("run", min(st.rem, key=lambda j: (cpu[j], j)))
+            act = ("stop",) if (st.failed and not TRUTH_ALL) else ("run", min(st.rem, key=lambda j: (cpu[j], j)))
         if act[0] != "run":
             break
         i = act[1]
@@ -689,6 +695,22 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
                 for j, m in enumerate(meta):
                     if m[0] == f and m[1] == c and m[2] > first and j not in st.rem:
                         out("F %d" % j)
+    if os.environ.get("BR_MARK") == "1":     # measurement builds only
+        try:
+            g = [i for i in order if "%s::%s::%s" % meta[i] == GIANT_TEST]
+            mk = None
+            if g and giant is not None:
+                mk = 1 | (2 if st.failed else 0) | (4 if st.rem else 0) | (8 if hung else 0) | (min(len(st.passed), 31) << 4)
+            elif g and g[0] in st.rem and not st.failed:
+                oc = sum(ctx.cpu[i] for i in order if i != g[0])
+                mk = (2 if mode == "swap" else 0) | (4 if plan.data else 0) | (8 if plan.unrun else 0) \
+                    | (16 if g[0] in ucost else 0) | (32 if g[0] in ucost and ucost[g[0]] * scale > GIANT_DEAR else 0) \
+                    | (64 if len(order) > SENTINEL_MIN else 0) | (128 if oc <= SENTINEL_CPU else 0) \
+                    | (256 if all(r.startswith("sqlglot/") for r in plan.py) and not failed_now else 0)
+            if mk is not None:
+                out("M %d" % mk)
+        except Exception:
+            pass
     if giant is not None:
         if st.rem or st.failed or hung or len(st.passed) < SENTINEL_MIN:
             st.rem.add(giant)
