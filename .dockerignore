@@ -1,0 +1,9 @@
+# Only what the Dockerfile copies goes into the build context.
+*
+!Dockerfile
+!requirements.txt
+!build/fetch_sqlglot.py
+!app/
+!tools/
+**/__pycache__
+**/*.pyc
