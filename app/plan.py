@@ -98,6 +98,11 @@ def _make_plan(cid, text, maps, root, use_cmp):
         if rel.endswith(".py") and rel.startswith(PKG):
             plan.py[rel] = new
             kind, tree = codediff.compare(old, new, path)
+            if kind == "same":
+                # comments, blank lines: the compiled code is the pinned one. The file is not part
+                # of the patch as far as running goes (tests that read it as text are candidates
+                # below, with the new text).
+                del plan.py[rel]
             shell = kind in ("syntax", "incomparable")
             if kind == "tree":
                 shell = any(n.own_changed and not n.is_function for n in codediff.walk(tree))

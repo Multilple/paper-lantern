@@ -25,6 +25,8 @@ from maps import bits
 # ---- how much a test run may cost before the test is selected without a verdict
 THETA_CLEAN = float(os.environ.get("BR_THETA_CLEAN", "0.75"))   # nothing has failed yet
 THETA_DIRTY = float(os.environ.get("BR_THETA_DIRTY", "0.9"))    # something already failed
+UNITS_ALWAYS = os.environ.get("BR_UNITS_ALWAYS", "1") == "1"
+UNITS_LIMIT = 80.0
 UNITS_GAIN = 0.9      # decide a giant unit by unit when that is expected to cost less than this share of a run
 POLICY_MODEL = policy.Model(0.15, 0.2, 0.1, small=(0.0, 5.0, 0.5), small_n=2)
 TIMEOUT_MIN = 4.0
@@ -538,7 +540,12 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             cpu[i] = est
     order = sorted(bits(cands), key=lambda i: (cpu[i], i))
     out("L " + " ".join(str(i) for i in order))
-    st = _PolicyState(order, failed_now | plan.unrun, bin(failed_now).count("1"), ctx, cpu)
+    pol_cpu = cpu
+    if ucost and UNITS_ALWAYS:
+        pol_cpu = list(cpu)
+        for i in ucost:
+            pol_cpu[i] = 0.01
+    st = _PolicyState(order, failed_now | plan.unrun, bin(failed_now).count("1"), ctx, pol_cpu)
     hung = set()
     signal.signal(signal.SIGVTALRM, _on_alarm)
     signal.signal(signal.SIGALRM, _on_alarm)
@@ -577,6 +584,8 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         if i in ucost:   # deciding unit by unit must not cost more than selecting the test does
             limit = min(limit, (ctx.cpu[i] + TIMEOUT_SLACK) * max(scale, 1.0))
         limit = max(1.0, min(limit, c_usual * max(scale, 1.0) + (allowance - over)))
+        if i in ucost and UNITS_ALWAYS:
+            limit = max(limit, UNITS_LIMIT)
         usual += c_usual * max(scale, 1.0)
         real = 4 * limit + 2
         if hard is not None:
