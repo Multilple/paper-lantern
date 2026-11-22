@@ -25,7 +25,7 @@ import statefp   # noqa: E402
 DATA = os.environ.get("BR_DATA", "/data")
 PER_COMMIT_WALL = float(os.environ.get("BR_WALL_PER_COMMIT", "4.6"))
 HARD_PER_COMMIT = float(os.environ.get("BR_HARD_PER_COMMIT", "5.2"))
-CPU_PRICE = 2.5
+CPU_PRICE = 1.4
 LAZY_TEST = "tests/dialects/test_dialect.py::TestDialect::test_lazy_load"
 T0 = time.monotonic()
 

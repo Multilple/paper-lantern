@@ -28,6 +28,10 @@ THETA_DIRTY = float(os.environ.get("BR_THETA_DIRTY", "0.9"))    # something alre
 UNITS_ALWAYS = os.environ.get("BR_UNITS_ALWAYS", "0") == "1"
 UNITS_LIMIT = 80.0
 TRUTH = os.environ.get("BR_TRUTH") == "1"
+GIANT_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+GIANT_DEAR = 4.0      # CPU seconds: a unit verdict dearer than this is not taken when the rule below applies
+SENTINEL_CPU = 3.0    # map CPU seconds of the other candidates, at most
+SENTINEL_MIN = int(os.environ.get("BR_SENTINEL_MIN", "10"))   # 0 turns the rule off
 UNITS_GAIN = 0.9      # decide a giant unit by unit when that is expected to cost less than this share of a run
 POLICY_MODEL = policy.Model(0.15, 0.2, 0.1, small=(0.0, 5.0, 0.5), small_n=2)
 TIMEOUT_MIN = 4.0
@@ -546,7 +550,20 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         pol_cpu = list(cpu)
         for i in ucost:
             pol_cpu[i] = 0.01
-    st = _PolicyState(order, failed_now | plan.unrun, bin(failed_now).count("1"), ctx, pol_cpu)
+    # The TPC-DS run is the one test whose verdict costs more CPU than selecting it does when the
+    # changed lines are in the executor: every query has to be executed again. When it is one
+    # candidate among many small ones, the small ones are run, and it is left out if all of them
+    # pass (see README, "the one calculated risk"). Any failure, any test not run: it is selected.
+    giant = None
+    if SENTINEL_MIN and mode == "swap" and not plan.data and not plan.unrun and not failed_now \
+            and all(r.startswith("sqlglot/") for r in plan.py) and len(order) > SENTINEL_MIN and not TRUTH:
+        for i in order:
+            if i in ucost and "%s::%s::%s" % meta[i] == GIANT_TEST and ucost[i] * scale > GIANT_DEAR:
+                giant = i
+        if giant is not None and sum(ctx.cpu[i] for i in order if i != giant) > SENTINEL_CPU:
+            giant = None      # the others are too dear to run them all for this: the usual rule
+    st = _PolicyState([i for i in order if i != giant], failed_now | plan.unrun, bin(failed_now).count("1"),
+                      ctx, pol_cpu)
     hung = set()
     signal.signal(signal.SIGVTALRM, _on_alarm)
     signal.signal(signal.SIGALRM, _on_alarm)
@@ -570,7 +587,8 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             act = policy.decide_next(st, POLICY_MODEL)
         except Exception:
             act = ("stop",)
-        if TRUTH:      # offline labelling: every candidate, cheapest first, until one fails
+        if TRUTH or giant is not None:
+            # (offline labelling, or the rule above) every candidate, cheapest first, until one fails
             act = ("stop",) if st.failed else ("run", min(st.rem, key=lambda j: (cpu[j], j)))
         if act[0] != "run":
             break
@@ -671,6 +689,11 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
                 for j, m in enumerate(meta):
                     if m[0] == f and m[1] == c and m[2] > first and j not in st.rem:
                         out("F %d" % j)
+    if giant is not None:
+        if st.rem or st.failed or hung or len(st.passed) < SENTINEL_MIN:
+            st.rem.add(giant)
+        else:
+            out("N giant left out: the %d other tests on the changed lines pass" % len(st.passed))
     if st.rem:
         out("U " + " ".join(str(i) for i in sorted(st.rem)))
     out("E")
