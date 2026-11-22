@@ -25,8 +25,9 @@ from maps import bits
 # ---- how much a test run may cost before the test is selected without a verdict
 THETA_CLEAN = float(os.environ.get("BR_THETA_CLEAN", "0.75"))   # nothing has failed yet
 THETA_DIRTY = float(os.environ.get("BR_THETA_DIRTY", "0.9"))    # something already failed
-UNITS_ALWAYS = os.environ.get("BR_UNITS_ALWAYS", "1") == "1"
+UNITS_ALWAYS = os.environ.get("BR_UNITS_ALWAYS", "0") == "1"
 UNITS_LIMIT = 80.0
+TRUTH = os.environ.get("BR_TRUTH") == "1"
 UNITS_GAIN = 0.9      # decide a giant unit by unit when that is expected to cost less than this share of a run
 POLICY_MODEL = policy.Model(0.15, 0.2, 0.1, small=(0.0, 5.0, 0.5), small_n=2)
 TIMEOUT_MIN = 4.0
@@ -562,13 +563,15 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     t_begin = time.process_time()
     while st.rem:
         over = max(0.0, (time.process_time() - t_begin) - usual)
-        if over >= allowance or (hard is not None and time.monotonic() > hard - 1.0):
+        if not TRUTH and (over >= allowance or (hard is not None and time.monotonic() > hard - 1.0)):
             out("N stopped: %.1fs over the usual time" % over)
             break
         try:
             act = policy.decide_next(st, POLICY_MODEL)
         except Exception:
             act = ("stop",)
+        if TRUTH:      # offline labelling: every candidate, cheapest first, until one fails
+            act = ("stop",) if st.failed else ("run", min(st.rem, key=lambda j: (cpu[j], j)))
         if act[0] != "run":
             break
         i = act[1]
@@ -584,8 +587,10 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         if i in ucost:   # deciding unit by unit must not cost more than selecting the test does
             limit = min(limit, (ctx.cpu[i] + TIMEOUT_SLACK) * max(scale, 1.0))
         limit = max(1.0, min(limit, c_usual * max(scale, 1.0) + (allowance - over)))
-        if i in ucost and UNITS_ALWAYS:
+        if i in ucost and (UNITS_ALWAYS or TRUTH):
             limit = max(limit, UNITS_LIMIT)
+        if TRUTH:
+            limit = max(limit, 4 * test_limit(ctx.cpu[i] + setup.get(key, 0.0), scale))
         usual += c_usual * max(scale, 1.0)
         real = 4 * limit + 2
         if hard is not None:

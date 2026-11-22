@@ -144,6 +144,15 @@ def build(old, new, parent=None):
         and old.co_kwonlyargcount == new.co_kwonlyargcount and old.co_flags == new.co_flags
         and old.co_name == new.co_name and old.co_qualname == new.co_qualname
     )
+    if meta_same and old.co_code == new.co_code and old.co_exceptiontable == new.co_exceptiontable \
+            and len(old.co_consts) == len(new.co_consts):
+        # the same bytes, names and constants: the same instructions, without taking them apart
+        try:
+            if all(x is y or _key(x) == _key(y) for x, y in zip(old.co_consts, new.co_consts)):
+                node.changed = any(k.changed for k in node.kids)
+                return node
+        except RecursionError:
+            pass
     ia, ib = _instrs(old), _instrs(new)
     sa = [(o, a) for o, a, _ in ia]
     sb = [(o, a) for o, a, _ in ib]

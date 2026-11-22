@@ -21,6 +21,7 @@ as unchanged. Anything else (other types, a comparison no test was seen to run, 
 the file) proves nothing here and the normal path decides.
 """
 import ast
+import re
 
 _EQ_METHODS = ("__eq__", "__ne__", "__hash__", "__bool__", "__lt__", "__le__", "__gt__", "__ge__")
 _SWAPS = {(ast.Is, ast.Eq), (ast.Eq, ast.Is), (ast.IsNot, ast.NotEq), (ast.NotEq, ast.IsNot)}
@@ -68,6 +69,9 @@ def _diff(a, b, out):
     return a == b
 
 
+_CMP_TEXT = re.compile(r"==|!=|<|>|\bis\b")
+
+
 def swapped_sites(old_src, new_src):
     """-> [(line, col, old operator, new operator)] of the swapped comparisons, by their place in
     the old source, or None when the two sources differ in anything else (or in nothing)."""
@@ -93,8 +97,18 @@ def swapped_sites(old_src, new_src):
 
 def unchanged(old_src, new_src, rel, table):
     """True when the new source provably behaves as the old one in every test."""
-    if not table:
+    if not table or not table.get(rel):
         return False
+    # a swapped operator leaves every line in its place: lines that differ must both hold a comparison
+    la, lb = old_src.split("\n"), new_src.split("\n")
+    if len(la) != len(lb):
+        return False
+    n = 0
+    for x, y in zip(la, lb):
+        if x != y:
+            n += 1
+            if n > 50 or not _CMP_TEXT.search(x) or not _CMP_TEXT.search(y):
+                return False
     sites = swapped_sites(old_src, new_src)
     if not sites:
         return False
