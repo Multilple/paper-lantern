@@ -1,6 +1,7 @@
 """Reads one patch and decides, without importing sqlglot, what kind of change it is."""
 import os
 
+import cmpeq
 import codediff
 import patch as patchlib
 
@@ -20,6 +21,7 @@ class Plan:
         self.cands = 0          # bitmap of the tests that can be affected, as far as known here
         self.unrun = 0          # bitmap of tests selected without a run
         self.lazy = False       # the test that starts "python -c 'import sqlglot'" can be affected
+        self.eq = []            # files whose only change is a swapped comparison that changes nothing
 
 
 def _all(plan, why):
@@ -36,6 +38,15 @@ def _bitmap(idxs):
 
 
 def make_plan(cid, text, maps, root):
+    plan = _make_plan(cid, text, maps, root, True)
+    if plan.eq and (plan.tier3 or plan.cands or plan.unrun or plan.data or plan.kind == "all"):
+        # the proof that a swapped comparison changes nothing rests on what the pinned commit does:
+        # with any other change in the same commit it is not used
+        plan = _make_plan(cid, text, maps, root, False)
+    return plan
+
+
+def _make_plan(cid, text, maps, root, use_cmp):
     plan = Plan(cid)
     try:
         changes = patchlib.parse(text)
@@ -66,6 +77,10 @@ def make_plan(cid, text, maps, root):
             plan.tier3 = True
             plan.why.add("dataimp")
             plan.data[rel] = new
+        if use_cmp and rel.endswith(".py") and rel.startswith("sqlglot/") and not readers \
+                and rel not in imp["opened"] and cmpeq.unchanged(old, new, rel, maps.cmp):
+            plan.eq.append(rel)
+            continue
         if rel.endswith(".py") and rel.startswith(PKG):
             plan.py[rel] = new
             kind, tree = codediff.compare(old, new, path)

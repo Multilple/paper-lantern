@@ -31,6 +31,7 @@ class Maps:
         self._opened = None
         self._types = None
         self._import = None
+        self._cmp = None
 
     def line_map(self, relpath):
         m = self._lines.get(relpath)
@@ -84,6 +85,17 @@ class Maps:
         if self._types is None:
             self._types = json.load(open(os.path.join(DIR, "types.json")))
         return self._types
+
+    @property
+    def cmp(self):
+        """maps/cmp.json (tools/trace_cmp.py): relpath -> {"line:col": [[kind, kind], ...]}"""
+        if self._cmp is None:
+            try:
+                with open(os.path.join(DIR, "cmp.json")) as f:
+                    self._cmp = json.load(f)
+            except Exception:
+                self._cmp = {}
+        return self._cmp
 
     @property
     def imp(self):
