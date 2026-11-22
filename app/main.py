@@ -278,6 +278,12 @@ def main():
         else:
             sel = [number[i] for i in mapslib.bits(res["sel"]) if number[i] is not None]
             answers[cid] = sorted(set(sel) | set(strangers)) if (sel or strangers) else []
+            # measurement builds only (probe.json is absent from real builds): how much is selected
+            # without any test having been seen to fail, by kind of commit
+            if ("blind_t3" if p.tier3 else "blind_swap") in probe and "failing" in res and not res["failing"]:
+                ms = [ctx.seconds_ms[i] for i in mapslib.bits(res["sel"])]
+                if ms and pack.bound(sum(ms), max(ms), len(ms)) >= 5000:
+                    answers[cid] = []
         log(cid, "tier3" if p.tier3 else "swap", "selected", len(answers[cid]), "ran", res.get("ran"), res.get("note", ""))
         dump = os.environ.get("BR_DUMP")
         if dump:

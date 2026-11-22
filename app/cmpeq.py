@@ -11,6 +11,10 @@ pairs of types `a is b` and `a == b` are the same thing by the rules of the lang
     Z  a value of a type with its own __eq__ that, compared with None on the pinned commit, answered
        "not equal" every time: Z with N only.
 
+The same map holds, for two plain values of one sort (numbers, strings, tuples of them), what each of
+== != < <= > >= said about them; an ordering comparison swapped for another one that said the same
+every time (`<` for `<=` where the two sides were never equal) is covered the same way.
+
 If every pair seen at every swapped comparison is of that sort, each run of the comparison gives the
 value it gave before, so every test does exactly what it did on the pinned commit: the file counts
 as unchanged. Anything else (other types, a comparison no test was seen to run, any other edit in
@@ -20,6 +24,8 @@ import ast
 
 _EQ_METHODS = ("__eq__", "__ne__", "__hash__", "__bool__", "__lt__", "__le__", "__gt__", "__ge__")
 _SWAPS = {(ast.Is, ast.Eq), (ast.Eq, ast.Is), (ast.IsNot, ast.NotEq), (ast.NotEq, ast.IsNot)}
+# what each ordering comparison said about two plain values is in the map, one bit per operator
+_BITS = {ast.Eq: 1, ast.NotEq: 2, ast.Lt: 4, ast.LtE: 8, ast.Gt: 16, ast.GtE: 32}
 
 
 def same_pair(ka, kb):
@@ -43,9 +49,10 @@ def _diff(a, b, out):
         return False
     if isinstance(a, ast.AST):
         if isinstance(a, ast.Compare) and len(a.ops) == 1 and len(b.ops) == 1 and type(a.ops[0]) is not type(b.ops[0]):
-            if (type(a.ops[0]), type(b.ops[0])) not in _SWAPS:
+            oa, ob = type(a.ops[0]), type(b.ops[0])
+            if (oa, ob) not in _SWAPS and not (oa in _BITS and ob in _BITS):
                 return False
-            out.append((a.lineno, a.col_offset))
+            out.append((a.lineno, a.col_offset, oa, ob))
             return _diff(a.left, b.left, out) and _diff(a.comparators, b.comparators, out)
         for f in a._fields:
             if not _diff(getattr(a, f, None), getattr(b, f, None), out):
@@ -62,8 +69,8 @@ def _diff(a, b, out):
 
 
 def swapped_sites(old_src, new_src):
-    """-> [(line, col) in the old source] of the swapped comparisons, or None when the two sources
-    differ in anything else (or in nothing)."""
+    """-> [(line, col, old operator, new operator)] of the swapped comparisons, by their place in
+    the old source, or None when the two sources differ in anything else (or in nothing)."""
     try:
         a = ast.parse(old_src)
         b = ast.parse(new_src)
@@ -78,8 +85,8 @@ def swapped_sites(old_src, new_src):
     # inside the methods that define equality itself nothing is concluded
     for node in ast.walk(a):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in _EQ_METHODS:
-            for line, _ in out:
-                if node.lineno <= line <= (node.end_lineno or node.lineno):
+            for site in out:
+                if node.lineno <= site[0] <= (node.end_lineno or node.lineno):
                     return None
     return out or None
 
@@ -94,11 +101,16 @@ def unchanged(old_src, new_src, rel, table):
     seen = table.get(rel)
     if not seen:
         return False
-    for line, col in sites:
+    for line, col, oa, ob in sites:
         pairs = seen.get("%d:%d" % (line, col))
         if not pairs:
             return False
-        for ka, kb in pairs:
-            if not same_pair(ka, kb):
-                return False
+        for p in pairs:
+            if (oa, ob) in _SWAPS:
+                if not same_pair(p[0], p[1]):
+                    return False
+            else:
+                m = p[2] if len(p) > 2 else -1
+                if m < 0 or bool(m & _BITS[oa]) != bool(m & _BITS[ob]):
+                    return False
     return True
