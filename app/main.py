@@ -362,6 +362,13 @@ def _main(out_fd):
             answers[cid] = sorted(set(sel) | set(strangers)) if (sel or strangers) else []
             # measurement builds only (probe.json is absent from real builds): how much is selected
             # without any test having been seen to fail, by kind of commit
+            for name, tid in (("drop_mn", "tests/test_parser.py::TestParser::test_max_nodes"),
+                              ("drop_tpcds", "tests/test_executor.py::TestExecutor::test_execute_tpcds")):
+                # how much the two giant tests cost when they are selected without having been seen to fail
+                if name in probe and "failing" in res and tid in known:
+                    i = maps.tests.index(tid)
+                    if (res["sel"] >> i) & 1 and not (res["failing"] >> i) & 1 and number[i] in answers[cid]:
+                        answers[cid] = [x for x in answers[cid] if x != number[i]]
             if ("blind_t3" if p.tier3 else "blind_swap") in probe and "failing" in res and not res["failing"]:
                 ms = [ctx.seconds_ms[i] for i in mapslib.bits(res["sel"])]
                 if ms and pack.bound(sum(ms), max(ms), len(ms)) >= 5000:
@@ -417,6 +424,8 @@ def _main(out_fd):
                         res = run_child(p, ctx, "fresh")
                     except Exception as e:
                         res = {"all": True, "note": "bookkeeping failed: %r" % (e,)}
+                    if "sel" not in res and not res.get("all"):
+                        res = {"all": True, "note": "no answer from a fresh import"}
                     finish(p.cid, res)
                 continue
             msg = recv(r)
