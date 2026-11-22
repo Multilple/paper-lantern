@@ -87,6 +87,17 @@ class Maps:
         return self._types
 
     @property
+    def cmp_tests(self):
+        """maps/cmp_tests.json (tools/trace_cmp_tests.py): what every test evaluated at every comparison"""
+        if getattr(self, "_cmp_tests", None) is None:
+            try:
+                with open(os.path.join(DIR, "cmp_tests.json")) as f:
+                    self._cmp_tests = json.load(f)
+            except Exception:
+                self._cmp_tests = {}
+        return self._cmp_tests
+
+    @property
     def cmp(self):
         """maps/cmp.json (tools/trace_cmp.py): relpath -> {"line:col": [[kind, kind], ...]}"""
         if self._cmp is None:

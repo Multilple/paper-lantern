@@ -176,14 +176,17 @@ def _make_plan(cid, text, maps, root, use_cmp):
             elif kind == "tree":
                 plan.trees[rel] = tree
                 ilines = imp["lines"].get(rel, set())
+                fc = 0          # tests that run a changed function line of this file
+                shell_here = False
                 for node in codediff.walk(tree):
                     if not node.own_changed:
                         continue
                     if not node.is_function:
                         plan.tier3 = True
                         plan.why.add("shell")
+                        shell_here = True
                         continue
-                    plan.cands |= maps.tests_on_lines(rel, node.lines)
+                    fc |= maps.tests_on_lines(rel, node.lines)
                     # lines that a few tests run only under pytest itself (it builds a description
                     # of every subtest with repr()/str() of sqlglot objects): our runner cannot
                     # reproduce that, so those tests are selected without a run
@@ -200,6 +203,14 @@ def _make_plan(cid, text, maps, root, use_cmp):
                             plan.tier3 = True  # the changed lines also ran during import
                             plan.why.add("func")
                         x = x.parent
+                if fc and use_cmp and not shell_here and rel.startswith("sqlglot/") and os.environ.get("BR_NONARROW") != "1":
+                    # the file differs only by swapped comparison operators inside functions: the
+                    # tests that never met one of them on operands that tell the operators apart
+                    # do what they did before (cmpeq.narrow)
+                    sites = cmpeq.swapped_sites(old, new)
+                    if sites:
+                        fc = cmpeq.narrow(sites, rel, fc, maps.cmp_tests)
+                plan.cands |= fc
             if readers:
                 plan.data[rel] = new
                 plan.cands |= _bitmap(readers)

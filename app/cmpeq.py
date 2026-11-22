@@ -128,3 +128,42 @@ def unchanged(old_src, new_src, rel, table):
                 if m < 0 or bool(m & _BITS[oa]) != bool(m & _BITS[ob]):
                     return False
     return True
+
+
+def _agree(oa, ob, ka, kb, bits):
+    """True when the two operators give the same answer for operands of these kinds (and, for plain
+    values, with this recorded outcome of the six comparisons)."""
+    if (oa, ob) in _SWAPS:
+        return same_pair(ka, kb)
+    if oa in _BITS and ob in _BITS:
+        return bits is not None and bits >= 0 and bool(bits & _BITS[oa]) == bool(bits & _BITS[ob])
+    return False
+
+
+def narrow(sites, rel, cands, table):
+    """The tests among cands (a bitmap) that a swap of comparison operators in this file can reach.
+
+    sites: swapped_sites(old, new); table: maps/cmp_tests.json (tools/trace_cmp_tests.py), what every
+    test evaluated at every comparison on the pinned commit. A test changes only if it first meets a
+    swapped comparison on operands for which the old and the new operator differ; until then it does
+    what it did on the pinned commit, so that meeting is in the trace. Tests without such a record are
+    left out. Nothing is left out when a site is not in the trace at all (not an instrumented
+    comparison), when the import itself evaluated a site on such operands, or on any doubt."""
+    try:
+        if not table or not sites:
+            return cands
+        imp, st = table.get("import", {}), table.get("sites", {})
+        keep = int(table.get("untraced", "0"), 16)
+        for line, col, oa, ob in sites:
+            key = "%s|%d:%d" % (rel, line, col)
+            if key not in st and key not in imp:
+                return cands
+            for o in imp.get(key, ()):
+                if not _agree(oa, ob, o[0], o[1], o[2] if len(o) > 2 else -1):
+                    return cands
+            for o in st.get(key, ()):
+                if not _agree(oa, ob, o[0], o[1], o[2]):
+                    keep |= int(o[3], 16)
+        return cands & keep
+    except Exception:
+        return cands
