@@ -32,7 +32,7 @@ TRUTH_ALL = os.environ.get("BR_TRUTH") == "2"     # do not stop at the first fai
 GIANT_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
 GIANT_DEAR = 4.0      # CPU seconds: a unit verdict dearer than this is not taken when the rule below applies
 SENTINEL_CPU = 3.0    # map CPU seconds of the other candidates, at most
-SENTINEL_MIN = int(os.environ.get("BR_SENTINEL_MIN", "10"))   # 0 turns the rule off
+SENTINEL_MIN = int(os.environ.get("BR_SENTINEL_MIN", "0"))    # 0: the rule is off (README, section 4)
 UNITS_GAIN = 0.9      # decide a giant unit by unit when that is expected to cost less than this share of a run
 POLICY_MODEL = policy.Model(0.15, 0.2, 0.1, small=(0.0, 5.0, 0.5), small_n=2)
 TIMEOUT_MIN = 2.5
@@ -562,10 +562,11 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
         pol_cpu = list(cpu)
         for i in ucost:
             pol_cpu[i] = 0.01
-    # The TPC-DS run is the one test whose verdict costs more CPU than selecting it does when the
-    # changed lines are in the executor: every query has to be executed again. When it is one
-    # candidate among many small ones, the small ones are run, and it is left out if all of them
-    # pass (see README, "the one calculated risk"). Any failure, any test not run: it is selected.
+    # Off unless SENTINEL_MIN is set (README, section 4: measured, not used). The TPC-DS run is the one
+    # test whose verdict costs more CPU than selecting it does when the changed lines are in the
+    # executor: every query has to be executed again. With the rule on, when it is one candidate among
+    # many small ones, the small ones are run, and it is left out if all of them pass. Any failure,
+    # any test not run: it is selected.
     giant = None
     if SENTINEL_MIN and mode == "swap" and not plan.data and not plan.unrun and not failed_now \
             and all(r.startswith("sqlglot/") for r in plan.py) and len(order) > SENTINEL_MIN and not TRUTH:

@@ -53,6 +53,41 @@ def make_plan(cid, text, maps, root):
     return plan
 
 
+_STARTUP_NAMES = ("conftest.py", "pytest.ini", ".pytest.ini", "tox.ini", "sitecustomize.py", "usercustomize.py")
+
+
+def _startup_risk(path, old, new):
+    """True when a change to this file can change how the test session itself starts: a conftest, a
+    pytest configuration file, a file Python loads at start-up. Nothing here models that, so such a
+    commit selects every test. pyproject.toml and setup.cfg count only when they no longer parse or
+    their pytest section differs."""
+    base = os.path.basename(path)
+    if base in _STARTUP_NAMES or base.endswith(".pth"):
+        return True
+    if path == "pyproject.toml":
+        try:
+            import tomllib
+
+            def sec(t):
+                d = tomllib.loads(t) if t is not None else {}
+                return d.get("tool", {}).get("pytest")
+            return sec(old) != sec(new)
+        except Exception:
+            return True
+    if path == "setup.cfg":
+        try:
+            import configparser
+
+            def sec(t):
+                c = configparser.ConfigParser()
+                c.read_string(t if t is not None else "")
+                return {k: dict(c[k]) for k in c.sections() if "pytest" in k}
+            return sec(old) != sec(new)
+        except Exception:
+            return True
+    return False
+
+
 def _make_plan(cid, text, maps, root, use_cmp):
     plan = Plan(cid)
     try:
@@ -64,6 +99,8 @@ def _make_plan(cid, text, maps, root, use_cmp):
     for c in changes:
         if c.old_path != c.new_path:
             involved = [p for p in (c.old_path, c.new_path) if p]
+            if any(_startup_risk(p, None, "") for p in involved):
+                return _all(plan, "start-up file added, removed or renamed: %s" % involved)
             if any(p.startswith(PKG) or p in opened or ("DIR:" + os.path.dirname(p)) in opened for p in involved):
                 return _all(plan, "file added, removed or renamed: %s" % involved)
             continue
@@ -79,6 +116,8 @@ def _make_plan(cid, text, maps, root, use_cmp):
             return _all(plan, "cannot apply to %s: %s" % (rel, e))
         if new == old:
             continue
+        if _startup_risk(rel, old, new):
+            return _all(plan, "start-up file changed: %s" % rel)
         readers = opened.get(rel, [])
         if rel in imp["opened"]:
             plan.tier3 = True

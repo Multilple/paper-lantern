@@ -30,6 +30,11 @@ sequence alignment (`codediff._align`); an old function without a partner counts
 lines (with those of any identical twin), and a new one without a partner shows up in the import state.
 Outcomes:
 
+A patch that adds, removes or changes a file the test session itself starts from (any `conftest.py`,
+`pytest.ini`, `tox.ini`, a `.pth` file, `sitecustomize.py`; `pyproject.toml` or `setup.cfg` when it no
+longer parses or its pytest section differs) selects every test: nothing here models a changed session
+start (`plan._startup_risk`).
+
 - only function bodies changed: a "swap" commit. Candidates are the tests whose recorded line coverage
   contains one of the changed lines (`maps/lines`).
 - a class body or module level changed, the new file does not compile ("syntax"), or the code objects
@@ -239,30 +244,28 @@ hash seed differs from the one the map was built with, a DuckDB text differs (`t
 more. The engine uses units only when the estimate is below 0.9 of a full run. On "unknown" the test runs
 whole, or, if it costs more than 3 s, is selected without a run.
 
-### The one calculated risk: `test_execute_tpcds` behind many small tests
+### A rule that was measured and is switched off: `test_execute_tpcds` behind many small tests
 
-Everything else in this program selects a test unless it was seen to pass or a map says the patch
-cannot reach it. There is one exception, and it is a bet, not a proof.
+Everything in this program selects a test unless it was seen to pass or a map says the patch cannot
+reach it. One exception was built, measured, and left off (`engine.SENTINEL_MIN = 0`).
 
 When changed lines are in code that every TPC-DS query runs (the Python executor, the planner), the unit
 verdict has to execute all 57 queries again. On the scoring machine that is about 28 CPU seconds, more
-than the 23.5 s that selecting the test costs. So for such a patch (`engine.py`, `GIANT_TEST`):
+than the 23.5 s that selecting the test costs, so the test is selected without a verdict. The rule would
+instead run the other candidates when more than 10 cheap tests run the changed lines, and leave the
+TPC-DS test out if all of them pass.
 
-- the test's unit verdict would cost more than `GIANT_DEAR` CPU seconds,
-- the patch changes only function bodies in `sqlglot/`, and more than 10 other tests run the changed
-  lines, costing at most 3 CPU seconds together,
+How often that would be wrong was measured: 632 single-token mutants of function bodies (swapped
+comparison, `and`/`or`, dropped `not`, flipped boolean, integer plus one) on lines the TPC-DS test runs,
+labeled with every candidate run to the first failure and the TPC-DS test by its full unit verdict. In
+456 of them the TPC-DS test was a candidate of a function-body change. A cheaper test failed in 377. In
+the 79 where every other candidate passed, the TPC-DS test passed in 78; with 10 or more other tests, in
+all 54 where its verdict is the dear kind. That is not proof, a miss costs 300 s, and in 9 cases of 10
+the rule only pays for the executor class's set-up before a small test fails. On the practice set it
+ran once, a small test failed, and nothing was saved. So it stays off (`BR_SENTINEL_MIN=10` turns it on).
 
-all those other tests are run, cheapest first. If one fails, or any is not run, the TPC-DS test is
-selected as before. If every one of them passes, it is left out.
-
-How often that is wrong was measured, not assumed. 632 single-token mutants of function bodies
-(swapped comparison, `and`/`or`, dropped `not`, flipped boolean, integer plus one) on lines the TPC-DS
-test runs were labeled with every candidate run to the first failure, the TPC-DS test by its full unit
-verdict. In 456 of them the TPC-DS test was a candidate of a function-body change. A cheaper test failed
-in 377. In the 79 where every other candidate passed, the TPC-DS test passed in 78. The one failure had 5
-other tests on the changed line; with 10 or more, it passed in all 54 cases where its verdict is the
-dear kind. Zero failures in 54 does not show the risk is zero: the true rate may be a few percent, and
-a miss costs 300 s. The rule is switched off with `BR_SENTINEL_MIN=0`.
+The same experiment for other dear tests (the big optimizer fixture tests) said no much more loudly:
+when the cheap candidates all pass, a dear one still fails about 1 time in 4.
 
 ## 5. The comparison-operator rule (`cmpeq.py`, `maps/cmp.json`)
 
@@ -409,7 +412,8 @@ PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 BR_LOG=1 python /path/to/app/main.py 
 - CPU is priced at a fixed 1.4 per recorded second. On the practice board a price of 2.5 scored worse
   (fewer small tests run, more selected), although one CPU second of test running there costs about
   2 recorded seconds: the pass rates in the model are rough.
-- `test_execute_tpcds` can be left out without a verdict (section 4, "the one calculated risk").
+- When the unit verdict of `test_execute_tpcds` costs more than selecting it (changes in code every
+  TPC-DS query runs), the test is selected without a verdict even if it would pass: 23.5 s.
 - The three comparison traces were merged by hand, outside `tools/`; `trace_cmp.py` writes one session
   per call and has no merge step.
 - The builders of `pytest_only.json`, `preload.json`, `session.json` and the `bare.json` input of
