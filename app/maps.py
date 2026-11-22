@@ -60,6 +60,20 @@ class Maps:
         return self.line_map(relpath)["any"]
 
     @property
+    def pytest_only(self):
+        if getattr(self, "_po", None) is None:
+            try:
+                self._po = json.load(open(os.path.join(DIR, "pytest_only.json")))
+            except Exception:
+                self._po = {}
+        return self._po
+
+    def index_of(self, test_id):
+        if getattr(self, "_idx", None) is None:
+            self._idx = {t: i for i, t in enumerate(self.tests)}
+        return self._idx.get(test_id)
+
+    @property
     def opened(self):
         if self._opened is None:
             self._opened = json.load(open(os.path.join(DIR, "opened.json")))

@@ -60,13 +60,29 @@ def _all_lines(code):
     return {l for _, _, l in code.co_lines() if l is not None}
 
 
+def _deep_lines(code):
+    out = _all_lines(code)
+    for c in code.co_consts:
+        if isinstance(c, types.CodeType):
+            out |= _deep_lines(c)
+    return out
+
+
 def build(old, new, parent=None):
     node = Node(old, new, parent)
     ok = [c for c in old.co_consts if isinstance(c, types.CodeType)]
     nk = [c for c in new.co_consts if isinstance(c, types.CodeType)]
     if len(ok) != len(nk) or [c.co_qualname for c in ok] != [c.co_qualname for c in nk] \
             or [c.co_flags & CO_OPTIMIZED for c in ok] != [c.co_flags & CO_OPTIMIZED for c in nk]:
-        raise Incomparable("nested code objects do not pair up in %s" % old.co_qualname)
+        # the nested functions do not pair up (for instance `while True:` turned into
+        # `while False:` drops the lambdas of the loop body). Inside a function that is simply a
+        # changed function: every line of it and of what it nests counts. At class or module
+        # level there is no such answer.
+        if not (old.co_flags & CO_OPTIMIZED and new.co_flags & CO_OPTIMIZED):
+            raise Incomparable("nested code objects do not pair up in %s" % old.co_qualname)
+        node.own_changed = node.changed = node.whole = True
+        node.lines = _deep_lines(old)
+        return node
     for a, b in zip(ok, nk):
         node.kids.append(build(a, b, node))
     meta_same = (

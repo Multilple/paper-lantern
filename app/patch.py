@@ -55,6 +55,9 @@ def parse(text):
                 i += 1
                 continue
         if ln.startswith("--- "):
+            if cur.hunks:      # a plain `diff -u` of several files has no "diff --git" lines
+                cur = FileChange()
+                out.append(cur)
             p = _strip(ln[4:].split("\t")[0])
             cur.old_path = p
             if p is None and cur.new_path is not None and not cur.hunks:
@@ -126,9 +129,9 @@ def apply(old_text, change):
     if old_text is None:
         old_lines, old_nl = [], True
     else:
-        old_lines = old_text.split("\n")
-        old_nl = old_text.endswith("\n")
-        if old_nl:
+        old_lines = old_text.split("\n") if old_text != "" else []
+        old_nl = old_text.endswith("\n") or old_text == ""
+        if old_text.endswith("\n"):
             old_lines.pop()
     res = []
     pos = 0

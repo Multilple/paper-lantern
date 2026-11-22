@@ -238,6 +238,9 @@ def roots_to_tests(roots, ctx, plan):
 # ---------------------------------------------------------------- running
 
 def _on_alarm(signum, frame):
+    # a test can swallow the exception (inside subTest, or `except BaseException`) and go on: from
+    # now on it is interrupted again every few hundredths of a CPU second until it ends
+    signal.setitimer(signal.ITIMER_VIRTUAL, 0.03, 0.03)
     raise core.TestTimeout()
 
 

@@ -111,6 +111,16 @@ def make_plan(cid, text, maps, root):
                         plan.why.add("shell")
                         continue
                     plan.cands |= maps.tests_on_lines(rel, node.lines)
+                    # lines that a few tests run only under pytest itself (it builds a description
+                    # of every subtest with repr()/str() of sqlglot objects): our runner cannot
+                    # reproduce that, so those tests are selected without a run
+                    po = maps.pytest_only.get(rel)
+                    if po:
+                        for l in node.lines:
+                            for tid in po.get(str(l), ()):
+                                i = maps.index_of(tid)
+                                if i is not None:
+                                    plan.unrun |= 1 << i
                     x = node
                     while x is not None and x.is_function:
                         if (rel, x.old.co_qualname, x.old.co_firstlineno) in imp["called"] and (node.lines & ilines):
