@@ -35,6 +35,8 @@ TIMEOUT_SLOPE = 2.0
 TIMEOUT_SLACK = 4.0
 # all the tests of one commit together may run this much longer than they usually do
 COMMIT_OVERRUN = 12.0
+# more changed roots than this after a fresh import: the import broke, every test is selected
+ROOTS_CAP = int(os.environ.get("BR_ROOTS_CAP", "3000"))
 
 
 def test_limit(c, scale):
@@ -78,11 +80,23 @@ def install_sources(root, py):
     loader = importlib.machinery.SourceFileLoader
     orig = loader.get_code
 
+    compiled = {}
+
     def get_code(self, fullname):
         path = self.get_filename(fullname)
         src = patched.get(path)
         if src is not None:
-            return compile(src, path, "exec", dont_inherit=True)
+            # a module that fails to import is imported again by every later importer: compile
+            # the patched text once (a file that does not compile can cost seconds each time)
+            if path not in compiled:
+                try:
+                    compiled[path] = compile(src, path, "exec", dont_inherit=True)
+                except Exception as e:
+                    compiled[path] = e
+            c = compiled[path]
+            if isinstance(c, Exception):
+                raise c
+            return c
         return orig(self, fullname)
 
     loader.get_code = get_code
@@ -364,6 +378,15 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
                     subst[statefp.code_digest(node.new)] = statefp.code_digest(node.old)
         fp = statefp.fingerprint(subst=subst)
         roots = statefp.changed_roots(ctx.base_fp, fp)
+        if "sqlglot" not in sys.modules or len(roots) > ROOTS_CAP:
+            # the package does not import, or the import state is unrecognisable (thousands of
+            # roots, and mapping them to tests alone would take most of a minute): everything
+            for i in bits(failed_now):
+                out("F %d" % i)
+            out("L")
+            out("U " + " ".join(str(i) for i in range(len(ctx.meta)) if not (failed_now >> i) & 1))
+            out("E")
+            return
         if not roots and not plan.cands and plan.why - {"func"}:
             # code that runs at import changed, yet nothing that can be seen differs and no test
             # runs a changed function: do not conclude "harmless" from that

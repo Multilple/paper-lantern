@@ -68,6 +68,43 @@ def _deep_lines(code):
     return out
 
 
+def _shape(code):
+    """What a code object does, without its line numbers (equal for a function that only moved)."""
+    consts = tuple(_shape(c) if isinstance(c, types.CodeType) else _key(c) for c in code.co_consts)
+    return (code.co_qualname, code.co_flags, code.co_code, code.co_names, code.co_varnames, code.co_freevars,
+            code.co_cellvars, code.co_argcount, code.co_kwonlyargcount, code.co_posonlyargcount, consts,
+            len(code.co_exceptiontable))
+
+
+def _align(ok, nk):
+    """Pairs the nested code objects of an old and a new class body or module that are identical.
+    -> ([(old, new)], [(old without partner, lines that count for it)]) or (None, None)."""
+    import difflib
+    try:
+        sa = [_shape(c) for c in ok]
+        sb = [_shape(c) for c in nk]
+        ha = [hash(x) for x in sa]
+        hb = [hash(x) for x in sb]
+    except (TypeError, RecursionError):
+        return None, None
+    pairs, used = [], set()
+    for i, j, n in difflib.SequenceMatcher(None, ha, hb, autojunk=False).get_matching_blocks():
+        for k in range(n):
+            if sa[i + k] == sb[j + k]:
+                pairs.append((ok[i + k], nk[j + k]))
+                used.add(i + k)
+    gone = []
+    for i, c in enumerate(ok):
+        if i in used:
+            continue
+        lines = _deep_lines(c)
+        for j, d in enumerate(ok):          # identical twins: which one went cannot be told
+            if j != i and sa[j] == sa[i]:
+                lines |= _deep_lines(d)
+        gone.append((c, lines))
+    return pairs, gone
+
+
 def build(old, new, parent=None):
     node = Node(old, new, parent)
     ok = [c for c in old.co_consts if isinstance(c, types.CodeType)]
@@ -78,11 +115,26 @@ def build(old, new, parent=None):
         # `while False:` drops the lambdas of the loop body). Inside a function that is simply a
         # changed function: every line of it and of what it nests counts. At class or module
         # level there is no such answer.
-        if not (old.co_flags & CO_OPTIMIZED and new.co_flags & CO_OPTIMIZED):
+        if old.co_flags & CO_OPTIMIZED and new.co_flags & CO_OPTIMIZED:
+            node.own_changed = node.changed = node.whole = True
+            node.lines = _deep_lines(old)
+            return node
+        # A class body or a module that gained or lost functions (an entry with a lambda added to
+        # or removed from a table, a method added or deleted). The functions that are the same in
+        # both, body for body, pair up; an old one without a partner is a function that is gone
+        # (or was rewritten): every line of it counts, as for any changed function. A new one
+        # without a partner has no old lines; what it changes shows in the import state.
+        pairs, gone = _align(ok, nk)
+        if pairs is None:
             raise Incomparable("nested code objects do not pair up in %s" % old.co_qualname)
-        node.own_changed = node.changed = node.whole = True
-        node.lines = _deep_lines(old)
-        return node
+        for a, b in pairs:
+            node.kids.append(build(a, b, node))
+        for a, lines in gone:
+            k = Node(a, a, node)
+            k.own_changed = k.changed = k.whole = True
+            k.lines = lines
+            node.kids.append(k)
+        ok = nk = ()
     for a, b in zip(ok, nk):
         node.kids.append(build(a, b, node))
     meta_same = (

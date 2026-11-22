@@ -239,14 +239,18 @@ def fingerprint(loose_keys=(), subst=None):
 
 
 def key_digests(table, subst=None, pr=None):
-    """{key name: digest of the value} for a class-level dict, or None when it is not a plain dict
-    or its keys have no distinct names (keymap.py). Same digests in every process."""
+    """{key name: digest of the value} for a class-level or module-level dict (for a set: its
+    elements), or None when it is not a plain dict or set or its keys have no distinct names
+    (keymap.py). Same digests in every process."""
     import keymap
-    if type(table) is not dict:
+    t = type(table)
+    if t is not dict and t is not set and t is not frozenset:
         return None
     names = keymap.names_of(table)
     if names is None:
         return None
+    if t is not dict:
+        return {n: t.__name__.encode() for n in names}      # a set: only which elements it has
     if pr is None:
         pr = Printer()
         pr.subst = subst or {}

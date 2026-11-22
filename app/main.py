@@ -112,6 +112,8 @@ def run_child(plan, ctx, mode):
     done = escalate = False
     buf = b""
     deadline = time.monotonic() + (30.0 if mode == "fresh" else 20.0)   # until the child reports its candidates
+    if ctx.hard is not None:
+        deadline = min(deadline, max(ctx.hard + 2.0, time.monotonic() + 1.0))
     cpu, setup, meta = ctx.cpu, ctx.setup, ctx.meta
     note = ""
     while True:

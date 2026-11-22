@@ -62,7 +62,7 @@ def keyname(k, depth=0):
 
 
 def names_of(d):
-    """{name: key} for a dict whose keys all have distinct names, else None."""
+    """{name: key} for a dict (or the elements of a set) whose keys all have distinct names, else None."""
     out = {}
     for k in d:
         n = keyname(k)

@@ -88,128 +88,218 @@ def _key(self, k):
 
 
 class RecDict(dict):
-    """The pinned table, with every way of reading it noted."""
-    __slots__ = ("_br_tag",)
+    """The pinned table, with every way of reading it noted. The entries live in _d; the dict this
+    object itself is stays EMPTY, so that anything reading it behind these methods' back (C code
+    going straight to the storage) gets nothing and shows up as a failing test in the trace."""
+    __slots__ = ("_br_tag", "_d")
 
     def __getitem__(self, k):
         _key(self, k)
-        return dict.__getitem__(self, k)
+        return self._d[k]
 
     def get(self, k, default=None):
         _key(self, k)
-        return dict.get(self, k, default)
+        return self._d.get(k, default)
 
     def __contains__(self, k):
         _key(self, k)
-        return dict.__contains__(self, k)
+        return k in self._d
+
+    def __len__(self):
+        _len(self, LEN)
+        return len(self._d)
+
+    def __bool__(self):
+        _len(self, BOOL)
+        return len(self._d) != 0
 
     # everything else that reads or writes counts as using the whole table
     def __iter__(self):
         _whole(self)
-        return dict.__iter__(self)
-
-    def __len__(self):
-        _len(self, LEN)
-        return dict.__len__(self)
-
-    def __bool__(self):
-        _len(self, BOOL)
-        return dict.__len__(self) != 0
+        return iter(self._d)
 
     def keys(self):
         _whole(self)
-        return dict.keys(self)
+        return self._d.keys()
 
     def values(self):
         _whole(self)
-        return dict.values(self)
+        return self._d.values()
 
     def items(self):
         _whole(self)
-        return dict.items(self)
+        return self._d.items()
 
     def copy(self):
         _whole(self)
-        return dict.copy(self)
+        return self._d.copy()
 
     def __eq__(self, o):
         _whole(self)
-        return dict.__eq__(self, o)
+        return self._d == (o._d if isinstance(o, RecDict) else o)
 
     def __ne__(self, o):
         _whole(self)
-        return dict.__ne__(self, o)
+        return self._d != (o._d if isinstance(o, RecDict) else o)
 
     __hash__ = None
 
     def __or__(self, o):
         _whole(self)
-        return dict.__or__(self, o)
+        return self._d | (o._d if isinstance(o, RecDict) else o)
 
     def __ror__(self, o):
         _whole(self)
-        return dict.__ror__(self, o)
+        return o | self._d
 
     def __ior__(self, o):
         _whole(self)
-        return dict.__ior__(self, o)
+        self._d.update(o)
+        return self
 
     def __repr__(self):
         _whole(self)
-        return dict.__repr__(self)
+        return repr(self._d)
 
     def __reversed__(self):
         _whole(self)
-        return dict.__reversed__(self)
+        return reversed(self._d)
 
     def __reduce_ex__(self, proto):
         _whole(self)
-        return (dict, (dict(dict.items(self)),))
+        return (dict, (dict(self._d),))
 
     def __reduce__(self):
         _whole(self)
-        return (dict, (dict(dict.items(self)),))
+        return (dict, (dict(self._d),))
 
     def __copy__(self):
         _whole(self)
-        return dict(dict.items(self))
+        return dict(self._d)
 
     def __deepcopy__(self, memo):
         _whole(self)
         import copy
-        return copy.deepcopy(dict(dict.items(self)), memo)
+        return copy.deepcopy(self._d, memo)
 
     def __setitem__(self, k, v):
         _whole(self)
-        return dict.__setitem__(self, k, v)
+        self._d[k] = v
 
     def __delitem__(self, k):
         _whole(self)
-        return dict.__delitem__(self, k)
+        del self._d[k]
 
     def pop(self, *a):
         _whole(self)
-        return dict.pop(self, *a)
+        return self._d.pop(*a)
 
     def popitem(self):
         _whole(self)
-        return dict.popitem(self)
+        return self._d.popitem()
 
     def setdefault(self, *a):
         _whole(self)
-        return dict.setdefault(self, *a)
+        return self._d.setdefault(*a)
 
     def update(self, *a, **kw):
         _whole(self)
-        return dict.update(self, *a, **kw)
+        return self._d.update(*a, **kw)
 
     def clear(self):
         _whole(self)
-        return dict.clear(self)
+        return self._d.clear()
 
     def __sizeof__(self):
         _whole(self)
-        return dict.__sizeof__(self)
+        return self._d.__sizeof__()
+
+
+def _plain(o):
+    return o._d if isinstance(o, (RecSet, RecFrozen)) else o
+
+
+def _set_methods(ns, mutable):
+    """Methods for a set that keeps its elements in _d and notes how it is read."""
+    def __contains__(self, k):
+        _key(self, k)
+        return k in self._d
+
+    def __len__(self):
+        _len(self, LEN)
+        return len(self._d)
+
+    def __bool__(self):
+        _len(self, BOOL)
+        return len(self._d) != 0
+    ns.update(__contains__=__contains__, __len__=__len__, __bool__=__bool__)
+
+    def whole(name):
+        def f(self, *a):
+            _whole(self)
+            return getattr(self._d, name)(*[_plain(x) for x in a])
+        f.__name__ = name
+        return f
+    for name in ("__iter__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__or__", "__and__",
+                 "__sub__", "__xor__", "__ror__", "__rand__", "__rsub__", "__rxor__", "union", "intersection",
+                 "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint", "copy",
+                 "__repr__", "__sizeof__"):
+        ns[name] = whole(name)
+    if mutable:
+        for name in ("add", "discard", "remove", "pop", "clear", "update", "intersection_update",
+                     "difference_update", "symmetric_difference_update", "__ior__", "__iand__", "__isub__", "__ixor__"):
+            ns[name] = whole(name)
+        ns["__hash__"] = None
+    else:
+        def __hash__(self):
+            _whole(self)
+            return hash(self._d)
+        ns["__hash__"] = __hash__
+
+    def __reduce_ex__(self, proto):
+        _whole(self)
+        return (type(self._d), (list(self._d),))
+    ns["__reduce_ex__"] = __reduce_ex__
+    ns["__reduce__"] = lambda self: __reduce_ex__(self, 2)
+    ns["__copy__"] = whole("copy")
+
+    def __deepcopy__(self, memo):
+        _whole(self)
+        import copy
+        return copy.deepcopy(self._d, memo)
+    ns["__deepcopy__"] = __deepcopy__
+
+
+class RecSet(set):
+    """A class-level set, the same way: elements in _d, the set itself empty."""
+    __slots__ = ("_br_tag", "_d")
+    _set_methods(locals(), True)
+
+
+class RecFrozen(frozenset):
+    __slots__ = ("_br_tag", "_d")
+    _set_methods(locals(), False)
+
+
+def _wrap(v, tag):
+    t = type(v)
+    if t is dict:
+        r = RecDict()
+        r._d = dict(v)
+    elif t is set:
+        r = RecSet()
+        r._d = set(v)
+    else:
+        r = RecFrozen()
+        r._d = frozenset(v)
+    r._br_tag = tag
+    return r
+
+
+# Sets are left alone unless BR_KEY_SETS=1: C code reads a set that is passed to it straight from its
+# storage (`d.keys() - S`, `set(S)`, `a.issubset(S)`), so a wrapped set cannot note every read.
+# The empty-storage wrappers showed exactly that (one test failed on `kwargs.keys() - SUPPORTED_SETTINGS`).
+_KINDS = (dict, set, frozenset) if os.environ.get("BR_KEY_SETS") == "1" else (dict,)
 
 
 def _base_refs():
@@ -241,14 +331,14 @@ def install():
         if count[cn] != 1:
             continue
         for name, v in list(vars(c).items()):
-            if type(v) is dict and not name.startswith("__"):
+            if type(v) in _KINDS and not name.startswith("__"):
                 groups.setdefault(id(v), (v, []))[1].append(("c", cn, name, c))
     for mn in sorted(m for m in list(sys.modules) if m == "sqlglot" or m.startswith("sqlglot.")):
         mod = sys.modules.get(mn)
         if mod is None:
             continue
         for name, v in list(vars(mod).items()):
-            if type(v) is dict and not name.startswith("__"):
+            if type(v) in _KINDS and not name.startswith("__"):
                 groups.setdefault(id(v), (v, []))[1].append(("g", mn, name, mod))
     del name, v
     tags, unsafe = [], {}
@@ -262,8 +352,7 @@ def install():
         if keymap.names_of(d) is None:
             unsafe[i] = "keys without distinct names"
             continue
-        r = RecDict(d)
-        r._br_tag = i
+        r = _wrap(d, i)
         try:
             for k, o, a, h in holders:
                 if k == "c":
@@ -303,9 +392,7 @@ def hook_dispatch():
             _quiet[0] = None
         if type(d) is not dict:
             return d
-        r = RecDict(d)
-        r._br_tag = t._br_tag
-        return r
+        return _wrap(d, t._br_tag)
     gen._build_dispatch = _build_dispatch
     return True
 
@@ -336,15 +423,33 @@ def main():
     tmods = {n: m for n, m in sys.modules.items() if (n == "tests" or n.startswith("tests.")) and m is not None}
 
     def uses(m):
+        """the test-side modules this one imports, read from its source (whatever it takes from
+        them, also plain values that carry no trace of where they come from)"""
+        import ast
         out_ = set()
-        for v in list(vars(m).values()):
-            n = v.__name__ if isinstance(v, type(sys)) else getattr(v, "__module__", None)
-            if not isinstance(n, str):
-                n = getattr(type(v), "__module__", None)
-            if isinstance(n, str) and n in tmods and n != m.__name__:
-                out_.add(n)
+        try:
+            tree = ast.parse(open(m.__file__, encoding="utf-8").read())
+        except Exception:
+            return set(tmods) - {m.__name__}
+        pkg = m.__name__ if hasattr(m, "__path__") else m.__name__.rpartition(".")[0]
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if node.level:
+                    parts = pkg.split(".")
+                    parts = parts[:len(parts) - (node.level - 1)] if node.level > 1 else parts
+                    base = ".".join(parts + ([node.module] if node.module else []))
+                names = [base] + [base + "." + a.name for a in node.names]
+            for n in names:
+                while n:
+                    if n in tmods and n != m.__name__:
+                        out_.add(n)
+                    n = n.rpartition(".")[0]
         return out_
-    direct = {n: uses(m) for n, m in tmods.items()}
+    direct = {n: uses(m) for n, m in tmods.items() if getattr(m, "__file__", None)}
 
     def closure(n):
         seen, stack = set(), [n]
@@ -364,6 +469,8 @@ def main():
         imported[str(i)] = fs
     unsafe = {str(k): v for k, v in unsafe.items()}
     out.write(json.dumps({"tags": tags, "unsafe": unsafe, "imported": imported}) + "\n"); out.flush()
+    if os.environ.get("BR_KEY_HEADER_ONLY") == "1":
+        return
     print("tables", len(tags), "unsafe", len(unsafe), file=sys.stderr)
     gc.collect(); gc.freeze()
     for t in tests:
