@@ -11,6 +11,7 @@ import signal
 import sys
 import types
 
+import attrmap
 import codediff
 import core
 import pack
@@ -191,6 +192,14 @@ def _resolve(name):
 def roots_to_tests(roots, ctx, plan):
     maps = ctx.maps
     acc = 0
+    # class attributes first: maps/attrs.bin knows which tests READ an attribute of a class
+    # (attrmap.py). Roots it cannot vouch for go the broad way below.
+    amap = None
+    try:
+        amap = attrmap.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps", "attrs.bin"))
+        acc, roots = attrmap.narrow(roots, amap, _resolve)
+    except Exception:
+        amap = None
     cnames = {k[1] for k in roots if k[0] == "c"}
     if cnames:
         # maps/types.json lists, for every class, the tests that handle an object of that class
@@ -198,6 +207,11 @@ def roots_to_tests(roots, ctx, plan):
         types = maps.types
         for n in cnames:
             tests = types.get(n)
+            if amap is not None:
+                try:
+                    acc |= attrmap.class_readers(amap, n)   # classes reached as dialect.tokenizer_class.X
+                except Exception:
+                    pass
             if tests:
                 for i in tests:
                     acc |= 1 << i
