@@ -342,6 +342,8 @@ def _main(out_fd):
         pass
     if "mark" in probe:
         os.environ["BR_MARK"] = "1"
+    if "mark2" in probe:
+        os.environ["BR_MARK2"] = "1"
     answers = {}   # cid -> list of numbers
     _STATE.update(cids=cids, answers=answers, everything=everything, ms=ms, forced=forced)
     for cid, p in plans.items():

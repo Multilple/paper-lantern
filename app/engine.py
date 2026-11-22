@@ -707,9 +707,31 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
                     | (16 if g[0] in ucost else 0) | (32 if g[0] in ucost and ucost[g[0]] * scale > GIANT_DEAR else 0) \
                     | (64 if len(order) > SENTINEL_MIN else 0) | (128 if oc <= SENTINEL_CPU else 0) \
                     | (256 if all(r.startswith("sqlglot/") for r in plan.py) and not failed_now else 0)
+            if os.environ.get("BR_MARK2") == "1":
+                mk = None
+                if g and giant is not None and st.failed:
+                    f = st.failed[0]
+                    tid = "%s::%s::%s" % meta[f]
+                    names = sorted(x[2] for x in meta if x[0] == "tests/test_executor.py" and x[1] == "TestExecutor")
+                    mk = names.index(meta[f][2]) if meta[f][:2] == ("tests/test_executor.py", "TestExecutor") else 63 | 256
+                    signal.setitimer(signal.ITIMER_VIRTUAL, 20.0)
+                    try:
+                        if core.run_test(tid, modules):
+                            mk |= 64
+                        reg = sys.modules["sqlglot.dialects.dialect"].Dialect._classes
+                        keep = core.session_state
+                        core.session_state = lambda _f: None
+                        try:
+                            reg.clear(); reg.update(core._registry_full or {})
+                            if core.run_test(tid, modules):
+                                mk |= 128
+                        finally:
+                            core.session_state = keep
+                    finally:
+                        signal.setitimer(signal.ITIMER_VIRTUAL, 0)
             if mk is not None:
                 out("M %d" % mk)
-        except Exception:
+        except BaseException:
             pass
     if giant is not None:
         if st.rem or st.failed or hung or len(st.passed) < SENTINEL_MIN:
