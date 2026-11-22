@@ -141,11 +141,15 @@ def run_child(plan, ctx, mode):
         os.killpg(pid, signal.SIGKILL)
     except OSError:
         pass
+    child_cpu = None
     try:
-        os.waitpid(pid, 0)
+        _, _, ru = os.wait4(pid, 0)
+        child_cpu = ru.ru_utime + ru.ru_stime
     except OSError:
         pass
     shutil.rmtree(tmpdir, ignore_errors=True)
+    if os.environ.get("BR_LOG") == "1":
+        log(plan.cid, mode, "child cpu %.2f" % (child_cpu or -1))
     if escalate:
         return {"escalate": True}
     if done:
@@ -276,6 +280,17 @@ def main():
                        "note": res.get("note", "")}, open(os.path.join(dump, cid + ".json"), "w"))
 
     if swap_plans or fresh:
+        # modules that the tests import and that are not sqlglot (pandas, numpy, duckdb, unittest ...):
+        # loaded once here, so that neither the warm process nor any fresh child loads them again
+        try:
+            import importlib
+            for name in json.load(open(os.path.join(mapslib.DIR, "preload.json"))):
+                try:
+                    importlib.import_module(name)
+                except BaseException:
+                    pass
+        except Exception:
+            pass
         r, w = os.pipe()
         wpid = os.fork()
         if wpid == 0:
