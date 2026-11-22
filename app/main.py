@@ -24,6 +24,7 @@ import statefp   # noqa: E402
 
 DATA = os.environ.get("BR_DATA", "/data")
 PER_COMMIT_WALL = float(os.environ.get("BR_WALL_PER_COMMIT", "4.6"))
+HARD_PER_COMMIT = float(os.environ.get("BR_HARD_PER_COMMIT", "5.2"))
 CPU_PRICE = 1.4
 LAZY_TEST = "tests/dialects/test_dialect.py::TestDialect::test_lazy_load"
 T0 = time.monotonic()
@@ -113,8 +114,10 @@ def run_child(plan, ctx, mode):
             if tag == "S":
                 started = int(line[2:])
                 key = meta[started][0] + "::" + meta[started][1]
-                lim = max(engine.TIMEOUT_MIN, engine.TIMEOUT_FACTOR * (cpu[started] + setup.get(key, 0.0))) * max(ctx.scale, 1.0)
+                lim = engine.test_limit(cpu[started] + setup.get(key, 0.0), ctx.scale)
                 deadline = time.monotonic() + 3 * lim + 10
+                if ctx.hard is not None:
+                    deadline = min(deadline, max(ctx.hard + 2.0, time.monotonic() + 1.0))
             elif tag == "F":
                 failing |= 1 << int(line[2:]); started = None
             elif tag == "P":
@@ -173,11 +176,14 @@ def warm_main(plans, ctx, wfd, wall_limit):
     # maps. A fixed factor: measuring this machine's speed from one short import was too noisy.
     ctx.scale = float(os.environ.get("BR_SCALE") or CPU_PRICE)
     fp = statefp.fingerprint() if any(True for _ in [1]) else None
+    t1 = time.process_time()
     send(wfd, ("B", fp, ctx.scale))
     if plans:
         ctx.index = engine.build_index()
+    t2 = time.process_time()
     gc.collect()
     gc.freeze()
+    log("warm process: import %.2f fingerprint %.2f index %.2f collect %.2f" % (imp_cpu, t1 - t - imp_cpu, t2 - t1, time.process_time() - t2))
     for p in plans:
         if time.monotonic() - T0 > wall_limit:
             send(wfd, ("R", p.cid, {"sel": p.cands | p.unrun, "note": "out of time"}))
@@ -221,6 +227,8 @@ def main():
     cdir = os.path.join(DATA, "commits")
     cids = sorted(f[:-6] for f in os.listdir(cdir) if f.endswith(".patch"))
     wall_limit = PER_COMMIT_WALL * max(len(cids), 1)
+    # the run is cut off at 6 s per commit: no test is still running after this
+    ctx.hard = T0 + HARD_PER_COMMIT * max(len(cids), 1)
     plans = {}
     for cid in cids:
         try:
@@ -231,7 +239,7 @@ def main():
             p = planlib.Plan(cid)
             p.kind, p.reason = "all", "plan failed: %r" % (e,)
             plans[cid] = p
-    log("plans", collections.Counter((p.kind, p.tier3) for p in plans.values()))
+    log("plans", collections.Counter((p.kind, p.tier3) for p in plans.values()), "cpu so far %.2f" % time.process_time())
 
     forced = {}
     probe = set()
@@ -261,10 +269,10 @@ def main():
 
     def finish(cid, res):
         p = plans[cid]
-        if not res.get("all") and p.tier3 and "shell" not in p.why and not res.get("sel"):
-            # a function that also runs during import changed, and nothing was found to fail:
-            # this is the one conclusion that has been wrong on hidden commits, so it is not trusted
-            res = {"all": True, "note": "import-time function change with no finding: " + str(res.get("note", ""))}
+        if not res.get("all") and p.tier3 and (p.why & {"syntax", "incomparable"}) and not res.get("sel"):
+            # the file no longer compiles, or its classes and functions cannot be paired with the
+            # pinned ones, and yet nothing was found to fail: that conclusion is not trusted
+            res = {"all": True, "note": "unpaired or broken file with no finding: " + str(res.get("note", ""))}
         if res.get("all"):
             answers[cid] = everything
         else:
@@ -308,8 +316,10 @@ def main():
             ctx.base_fp, ctx.scale = msg[1], msg[2]
         log("warm ready, scale %.2f" % ctx.scale)
         pending = {p.cid for p in swap_plans}
+        # one test-running child at a time: a single pinned test needs 1.7 GB by itself and the
+        # container has 4 GB, so the fresh-import commits wait until the warm process is done
         while warm_alive or fresh:
-            if fresh:
+            if fresh and not warm_alive:
                 p = fresh.popleft()
                 if ctx.base_fp is None or time.monotonic() - T0 > wall_limit:
                     finish(p.cid, {"all": True, "note": "no base state or out of time"})
@@ -347,6 +357,7 @@ def main():
             items = sorted(((ms[t], t) for t in everything), reverse=True)
             workers = [[t for _, t in b] for b in pack._lpt(items, forced[cid])[1]]
         lines.append(json.dumps({"commit": cid, "workers": workers}, separators=(",", ":")))
+    log("main process cpu %.2f" % time.process_time())
     data = ("\n".join(lines) + "\n").encode() if lines else b""
     while data:
         k = os.write(out_fd, data)

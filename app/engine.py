@@ -6,6 +6,7 @@ import io
 import importlib
 import importlib.machinery
 import os
+import time
 import re
 import signal
 import sys
@@ -27,6 +28,17 @@ UNITS_GAIN = 0.9      # decide a giant unit by unit when that is expected to cos
 POLICY_MODEL = policy.Model(0.15, 0.2, 0.1, small=(0.0, 5.0, 0.5), small_n=2)
 TIMEOUT_MIN = 4.0
 TIMEOUT_FACTOR = 15.0
+# Waiting for a slow test costs CPU seconds one for one, and selecting it without a verdict costs
+# at most its own time, so a test is given up on once it has used about twice its usual time.
+TIMEOUT_SLOPE = 2.0
+TIMEOUT_SLACK = 4.0
+# all the tests of one commit together may run this much longer than they usually do
+COMMIT_OVERRUN = 12.0
+
+
+def test_limit(c, scale):
+    """CPU seconds a test that usually takes c seconds (with its class set-up) may use."""
+    return max(TIMEOUT_MIN, min(TIMEOUT_FACTOR * c, TIMEOUT_SLOPE * c + TIMEOUT_SLACK)) * max(scale, 1.0)
 
 
 class Ctx:
@@ -43,6 +55,7 @@ class Ctx:
     base_fp = None     # fingerprint of the pinned import state (fresh children only)
     lazy_idx = None    # idx of the test that starts a python subprocess
     bare = None        # relpaths that "import sqlglot" loads
+    hard = None        # time.monotonic() value after which no test is run any more
 
 
 def build_index():
@@ -259,7 +272,11 @@ def _on_alarm(signum, frame):
 
 
 RSS_LIMIT = int(float(os.environ.get("BR_RSS_MB", "1300")) * 1024 * 1024)
-DATA_LIMIT = int(float(os.environ.get("BR_DATA_MB", "2600")) * 1024 * 1024)
+RSS_LIMIT_BIG = int(2900 * 1024 * 1024)
+# the one pinned test that needs a lot of memory by itself (about 1.7 GB: two million tokens)
+BIG_MEMORY_TESTS = {"tests/test_parser.py::TestParser::test_max_nodes"}
+DATA_LIMIT = int(float(os.environ.get("BR_DATA_MB", "3600")) * 1024 * 1024)
+_rss_limit = [RSS_LIMIT]
 _PAGE = os.sysconf("SC_PAGE_SIZE")
 
 
@@ -272,7 +289,7 @@ def _on_prof(signum, frame):
             rss = int(f.read().split()[1]) * _PAGE
     except Exception:
         return
-    if rss > RSS_LIMIT:
+    if rss > _rss_limit[0]:
         raise core.TestTimeout()
 
 
@@ -363,7 +380,15 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
     except Exception:
         pass
     farm = None
+    hard = getattr(ctx, "hard", None)        # time.monotonic() value after which nothing more is run
+    allowance = COMMIT_OVERRUN * max(scale, 1.0)
+    usual = 0.0
+    t_begin = time.process_time()
     while st.rem:
+        over = max(0.0, (time.process_time() - t_begin) - usual)
+        if over >= allowance or (hard is not None and time.monotonic() > hard - 1.0):
+            out("N stopped: %.1fs over the usual time" % over)
+            break
         try:
             act = policy.decide_next(st, POLICY_MODEL)
         except Exception:
@@ -378,15 +403,24 @@ def run_commit(plan, ctx, wfd, mode, tmpdir):
             st.failed.append(i)
             continue
         out("S %d" % i)
-        limit = max(TIMEOUT_MIN, TIMEOUT_FACTOR * (ctx.cpu[i] + setup.get(key, 0.0))) * max(scale, 1.0)
+        c_usual = (cpu[i] if i in ucost else ctx.cpu[i]) + setup.get(key, 0.0)
+        limit = test_limit(ctx.cpu[i] + setup.get(key, 0.0), scale)
+        if i in ucost:   # deciding unit by unit must not cost more than selecting the test does
+            limit = min(limit, (ctx.cpu[i] + TIMEOUT_SLACK) * max(scale, 1.0))
+        limit = max(1.0, min(limit, c_usual * max(scale, 1.0) + (allowance - over)))
+        usual += c_usual * max(scale, 1.0)
+        real = 4 * limit + 2
+        if hard is not None:
+            real = max(0.5, min(real, hard - time.monotonic()))
         cwd = None
         if i == ctx.lazy_idx and plan.py:
             if farm is None:
                 farm = make_farm(ctx.root, plan.py, tmpdir)
             cwd = os.getcwd()
             os.chdir(farm)
+        _rss_limit[0] = RSS_LIMIT_BIG if ("%s::%s::%s" % meta[i]) in BIG_MEMORY_TESTS else RSS_LIMIT
         signal.setitimer(signal.ITIMER_VIRTUAL, limit, limit / 2)
-        signal.setitimer(signal.ITIMER_REAL, 4 * limit + 2)   # a test that waits instead of computing
+        signal.setitimer(signal.ITIMER_REAL, real)   # a test that waits instead of computing
         signal.setitimer(signal.ITIMER_PROF, 0.2, 0.2)
         timed_out = False
         try:

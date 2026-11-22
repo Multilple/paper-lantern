@@ -26,19 +26,16 @@ _code_memo = {}
 
 
 def code_digest(code):
-    """Digest of a code object without its line numbers."""
+    """Digest of a code object without its line numbers (bytes; equal within one run)."""
     d = _code_memo.get(code)
     if d is None:
-        h = hashlib.blake2b(digest_size=8)
-        h.update(code.co_code)
-        h.update(repr((code.co_names, code.co_varnames, code.co_freevars, code.co_cellvars,
-                       code.co_argcount, code.co_kwonlyargcount, code.co_flags)).encode())
-        for c in code.co_consts:
-            if isinstance(c, types.CodeType):
-                h.update(code_digest(c))
-            else:
-                h.update(repr((type(c).__name__, c)).encode("utf-8", "surrogatepass"))
-        d = _code_memo[code] = h.digest()
+        consts = tuple(code_digest(c) if isinstance(c, types.CodeType) else c for c in code.co_consts)
+        try:
+            h = hash((code.co_code, code.co_names, code.co_varnames, code.co_freevars, code.co_cellvars,
+                      code.co_argcount, code.co_kwonlyargcount, code.co_flags, consts))
+        except TypeError:
+            h = hash((code.co_code, code.co_names, code.co_varnames, repr(consts)))
+        d = _code_memo[code] = h.to_bytes(8, "little", signed=True)
     return d
 
 
